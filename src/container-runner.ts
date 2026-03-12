@@ -295,7 +295,12 @@ export async function runContainerAgent(
   const safeName = group.folder.replace(/[^a-zA-Z0-9-]/g, '-');
   const containerName = `nanoclaw-${safeName}-${Date.now()}`;
   const ghToken = await getGithubToken();
-  const containerArgs = buildContainerArgs(mounts, containerName, input.isMain, ghToken ?? undefined);
+  const containerArgs = buildContainerArgs(
+    mounts,
+    containerName,
+    input.isMain,
+    ghToken ?? undefined,
+  );
 
   logger.debug(
     {

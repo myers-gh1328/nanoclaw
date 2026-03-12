@@ -9,10 +9,17 @@
  *             API key via /api/oauth/claude_cli/create_api_key.
  *             Proxy injects real OAuth token on that exchange request;
  *             subsequent requests carry the temp key which is valid as-is.
+ *
+ * OAuth token source (in priority order):
+ *   1. ~/.claude/.credentials.json (auto-refreshed by the CLI)
+ *   2. CLAUDE_CODE_OAUTH_TOKEN in .env
  */
 import { createServer, Server } from 'http';
 import { request as httpsRequest } from 'https';
 import { request as httpRequest, RequestOptions } from 'http';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
 
 import { readEnvFile } from './env.js';
 import { logger } from './logger.js';
@@ -21,6 +28,24 @@ export type AuthMode = 'api-key' | 'oauth';
 
 export interface ProxyConfig {
   authMode: AuthMode;
+}
+
+const CREDENTIALS_PATH = path.join(
+  os.homedir(),
+  '.claude',
+  '.credentials.json',
+);
+
+/** Read the current OAuth access token from ~/.claude/.credentials.json */
+function readClaudeCredentials(): string | null {
+  try {
+    const raw = fs.readFileSync(CREDENTIALS_PATH, 'utf-8');
+    const creds = JSON.parse(raw);
+    const token = creds?.claudeAiOauth?.accessToken;
+    return token || null;
+  } catch {
+    return null;
+  }
 }
 
 export function startCredentialProxy(
@@ -35,8 +60,15 @@ export function startCredentialProxy(
   ]);
 
   const authMode: AuthMode = secrets.ANTHROPIC_API_KEY ? 'api-key' : 'oauth';
-  const oauthToken =
+
+  // For OAuth, prefer the live credentials file (auto-refreshed by the CLI).
+  // Fall back to .env token if the file isn't present.
+  const envOauthToken =
     secrets.CLAUDE_CODE_OAUTH_TOKEN || secrets.ANTHROPIC_AUTH_TOKEN;
+
+  const getOauthToken = (): string | undefined => {
+    return readClaudeCredentials() || envOauthToken || undefined;
+  };
 
   const upstreamUrl = new URL(
     secrets.ANTHROPIC_BASE_URL || 'https://api.anthropic.com',
@@ -73,8 +105,9 @@ export function startCredentialProxy(
           // x-api-key only, so they pass through without token injection.
           if (headers['authorization']) {
             delete headers['authorization'];
-            if (oauthToken) {
-              headers['authorization'] = `Bearer ${oauthToken}`;
+            const token = getOauthToken();
+            if (token) {
+              headers['authorization'] = `Bearer ${token}`;
             }
           }
         }
