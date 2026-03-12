@@ -61,10 +61,15 @@ import {
   findPendingIssue,
   savePendingIssues,
   fileGithubIssue,
-  runBugInvestigation,
   applyModificationAndFile,
   formatTelegramNotification,
 } from './slack-intake.js';
+import {
+  addToQueue,
+  startWorkerLoop,
+  resetRunningItems,
+  formatQueueStatus,
+} from './investigation-queue.js';
 import { getGithubToken } from './github-token.js';
 import { Channel, NewMessage, RegisteredGroup } from './types.js';
 import { logger } from './logger.js';
@@ -204,22 +209,11 @@ async function triggerManualInvestigation(
     createdAt: new Date().toISOString(),
   };
 
-  const result = await runBugInvestigation(
-    issue,
-    issueNum,
-    SLACK_INTAKE_GROUP_FOLDER,
+  addToQueue(issueNum, issueData.title, issue);
+  await telegramChannel.sendMessage(
+    telegramJid,
+    `Added issue #${issueNum} to the investigation queue.`,
   );
-  if (result.type === 'fixed') {
-    await telegramChannel.sendMessage(
-      telegramJid,
-      `Found and fixed — PR open for Copilot review: ${result.prUrl}`,
-    );
-  } else {
-    await telegramChannel.sendMessage(
-      telegramJid,
-      `Couldn't locate the bug — assigned to Copilot.\nFindings: ${result.summary}`,
-    );
-  }
 }
 
 async function handleIntakeApproval(
@@ -265,33 +259,13 @@ async function handleIntakeApproval(
           `@${issue.reporterName} I created issue #${issueNum} for you.`,
         );
       }
-      // For bugs, kick off code investigation in the background
+      // For bugs, queue for investigation
       if (issue.type === 'bug' && issueNum) {
+        addToQueue(issueNum, issue.title, issue);
         await telegramChannel.sendMessage(
           telegramJid,
-          `Investigating the codebase for issue #${issueNum}...`,
+          `Filed and queued for investigation.`,
         );
-        const capturedTelegramChannel = telegramChannel;
-        runBugInvestigation(issue, issueNum, SLACK_INTAKE_GROUP_FOLDER)
-          .then(async (result) => {
-            if (result.type === 'fixed') {
-              await capturedTelegramChannel.sendMessage(
-                telegramJid,
-                `Found and fixed — PR open for Copilot review: ${result.prUrl}`,
-              );
-            } else {
-              await capturedTelegramChannel.sendMessage(
-                telegramJid,
-                `Couldn't locate the bug — assigned to Copilot.\nFindings: ${result.summary}`,
-              );
-            }
-          })
-          .catch(async (err) => {
-            await capturedTelegramChannel.sendMessage(
-              telegramJid,
-              `Investigation error: ${err instanceof Error ? err.message : String(err)}`,
-            );
-          });
       }
     } catch (err) {
       await telegramChannel.sendMessage(
@@ -369,6 +343,56 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     'Processing messages',
   );
 
+  // Check for intake approval replies and investigate commands in the Ollama Telegram bot
+  // (must run before the Ollama routing block since tgo: matches isOllamaChat)
+  if (chatJid === TELEGRAM_OLLAMA_JID) {
+    for (const msg of missedMessages) {
+      if (msg.is_from_me) continue;
+      const text = msg.content.trim();
+      let decision: string | null = null;
+      let ref: string | null = null;
+
+      const parsed = parseApprovalReply(text);
+      if (parsed) {
+        decision = parsed.decision;
+        ref = parsed.ref;
+      } else {
+        const bareMatch = /^(yes|no|yes but .+)$/i.exec(text);
+        if (bareMatch) {
+          const pending = loadPendingIssues(SLACK_INTAKE_GROUP_FOLDER);
+          if (pending.length === 1) {
+            decision = bareMatch[1].trim();
+            ref = pending[0].id;
+          }
+        }
+      }
+
+      if (decision && ref) {
+        await channel.sendMessage(chatJid, 'On it...');
+        await handleIntakeApproval(decision, ref, channel, chatJid);
+        return true;
+      }
+
+      // Trigger manual investigation: "investigate #123"
+      const investigateMatch = /^investigate\s+#?(\d+)/i.exec(text);
+      if (investigateMatch) {
+        const issueNum = investigateMatch[1];
+        await channel.sendMessage(chatJid, `Fetching issue #${issueNum} and starting investigation...`);
+        triggerManualInvestigation(issueNum, channel, chatJid).catch((err) => {
+          logger.error({ issueNum, err }, 'Manual investigation error');
+          channel.sendMessage(chatJid, `Investigation error: ${err instanceof Error ? err.message : String(err)}`);
+        });
+        return true;
+      }
+
+      // Queue status command
+      if (/^queue$/i.test(text)) {
+        await channel.sendMessage(chatJid, formatQueueStatus());
+        return true;
+      }
+    }
+  }
+
   // Route to Ollama if:
   // - chat is on the dedicated Ollama bot (tgo: prefix), OR
   // - last user message starts with @ollama
@@ -388,31 +412,46 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     await channel.setTyping?.(chatJid, true);
     try {
       if (chatJid === SLACK_INTAKE_JID) {
-        const reporterName = lastUserMsg?.sender_name ?? 'unknown';
-        await channel.sendMessage(
-          chatJid,
-          `Thanks @${reporterName}, reviewing your report...`,
-        );
-        const result = await runSlackIntakeAgent(
-          text,
-          group.folder,
-          reporterName,
-          chatJid,
-        );
-        if (result.type === 'drafted') {
+        const userMessages = missedMessages.filter((m) => !m.is_from_me);
+        for (const msg of userMessages) {
+          const reporterName = msg.sender_name ?? 'unknown';
+          const userId = msg.sender;
           await channel.sendMessage(
             chatJid,
-            `Got it @${reporterName} — I've drafted an issue and sent it for review.`,
+            `Thanks @${reporterName}, reviewing your report...`,
           );
-          const telegramChannel = findChannel(channels, TELEGRAM_OLLAMA_JID);
-          if (telegramChannel) {
-            await telegramChannel.sendMessage(
-              TELEGRAM_OLLAMA_JID,
-              formatTelegramNotification(result.issue),
+          try {
+            const result = await runSlackIntakeAgent(
+              msg.content,
+              group.folder,
+              reporterName,
+              chatJid,
+              userId,
+            );
+            if (result.type === 'drafted') {
+              await channel.sendMessage(
+                chatJid,
+                `Got it @${reporterName} — I've drafted an issue and sent it for review.`,
+              );
+              const telegramChannel = findChannel(channels, TELEGRAM_OLLAMA_JID);
+              if (telegramChannel) {
+                for (const issue of result.issues) {
+                  await telegramChannel.sendMessage(
+                    TELEGRAM_OLLAMA_JID,
+                    formatTelegramNotification(issue),
+                  );
+                }
+              }
+            } else {
+              await channel.sendMessage(chatJid, result.message);
+            }
+          } catch (err) {
+            logger.error({ reporterName, userId, err }, 'Slack intake error');
+            await channel.sendMessage(
+              chatJid,
+              `Sorry @${reporterName}, something went wrong. Please try again.`,
             );
           }
-        } else {
-          await channel.sendMessage(chatJid, result.message);
         }
       } else {
         const reply = await runOllamaAgent(text, group.folder);
@@ -425,56 +464,6 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       await channel.setTyping?.(chatJid, false);
     }
     return true;
-  }
-
-  // Check for intake approval replies and investigate commands in the Ollama Telegram bot
-  if (chatJid === TELEGRAM_OLLAMA_JID) {
-    for (const msg of missedMessages) {
-      if (msg.is_from_me) continue;
-      const text = msg.content.trim();
-      let decision: string | null = null;
-      let ref: string | null = null;
-
-      // Try explicit ref pattern first: "yes (ref: abc123)"
-      const parsed = parseApprovalReply(text);
-      if (parsed) {
-        decision = parsed.decision;
-        ref = parsed.ref;
-      } else {
-        // Fallback: bare "yes", "no", or "yes but X" with exactly one pending issue
-        const bareMatch = /^(yes|no|yes but .+)$/i.exec(text);
-        if (bareMatch) {
-          const pending = loadPendingIssues(SLACK_INTAKE_GROUP_FOLDER);
-          if (pending.length === 1) {
-            decision = bareMatch[1].trim();
-            ref = pending[0].id;
-          }
-        }
-      }
-
-      if (decision && ref) {
-        await channel.sendMessage(chatJid, 'On it...');
-        await handleIntakeApproval(decision, ref, channel, chatJid);
-        continue;
-      }
-
-      // Trigger manual investigation: "investigate #123"
-      const investigateMatch = /^investigate\s+#?(\d+)/i.exec(text);
-      if (investigateMatch) {
-        const issueNum = investigateMatch[1];
-        await channel.sendMessage(
-          chatJid,
-          `Fetching issue #${issueNum} and starting investigation...`,
-        );
-        triggerManualInvestigation(issueNum, channel, chatJid).catch((err) => {
-          logger.error({ issueNum, err }, 'Manual investigation error');
-          channel.sendMessage(
-            chatJid,
-            `Investigation error: ${err instanceof Error ? err.message : String(err)}`,
-          );
-        });
-      }
-    }
   }
 
   // Track idle timer for closing stdin when agent is idle
@@ -758,6 +747,7 @@ async function main(): Promise<void> {
   initDatabase();
   logger.info('Database initialized');
   loadState();
+  resetRunningItems();
 
   // Start credential proxy (containers route API calls through this)
   const proxyServer = await startCredentialProxy(
@@ -866,6 +856,15 @@ async function main(): Promise<void> {
   });
   queue.setProcessMessagesFn(processGroupMessages);
   recoverPendingMessages();
+  startWorkerLoop({ channels, telegramJid: TELEGRAM_OLLAMA_JID }, async (item, result) => {
+    const telegramChannel = findChannel(channels, TELEGRAM_OLLAMA_JID);
+    if (!telegramChannel) return;
+    const msg =
+      result?.type === 'fixed'
+        ? `Investigation complete for #${item.issueNumber}: PR filed at ${result.prUrl}`
+        : `Investigation complete for #${item.issueNumber}: assigned to Copilot. ${result?.type === 'assigned' ? result.summary : ''}`;
+    await telegramChannel.sendMessage(TELEGRAM_OLLAMA_JID, msg);
+  });
   startMessageLoop().catch((err) => {
     logger.fatal({ err }, 'Message loop crashed unexpectedly');
     process.exit(1);
