@@ -371,9 +371,24 @@ export async function runBugInvestigation(
     return { type: 'fixed', prUrl: fixedMatch[1] };
   }
 
+  // Model didn't fix it — guarantee the GitHub assignment actually happens
+  // regardless of whether the model ran the commands itself
   const assignedMatch = /RESULT:ASSIGNED:(.+)/i.exec(reply);
-  return {
-    type: 'assigned',
-    summary: assignedMatch ? assignedMatch[1].trim() : reply.slice(0, 200),
-  };
+  const summary = assignedMatch ? assignedMatch[1].trim() : reply.slice(0, 300);
+
+  logger.info({ issueNumber }, 'Investigation did not fix — ensuring Copilot assignment');
+  const findingsBody = `Investigation findings:\n\n${summary}`;
+  await executeBash(
+    `gh issue comment ${issueNumber} --repo ${INVOICING_REPO} --body ${JSON.stringify(findingsBody)}`,
+    INVOICING_PATH,
+    ghToken,
+  ).catch((err) => logger.warn({ issueNumber, err }, 'Failed to post investigation comment'));
+
+  await executeBash(
+    `gh issue edit ${issueNumber} --repo ${INVOICING_REPO} --add-assignee copilot`,
+    INVOICING_PATH,
+    ghToken,
+  ).catch((err) => logger.warn({ issueNumber, err }, 'Failed to assign issue to Copilot'));
+
+  return { type: 'assigned', summary };
 }
