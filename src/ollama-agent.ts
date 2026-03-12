@@ -296,7 +296,7 @@ export async function runOllamaAgent(
     toolHandler?: (
       name: string,
       args: Record<string, unknown>,
-    ) => Promise<string | null>;
+    ) => Promise<{ result: string; stop?: boolean } | null>;
   },
 ): Promise<string> {
   if (!histories.has(groupFolder)) {
@@ -444,7 +444,11 @@ export async function runOllamaAgent(
         }
       } else if (options?.toolHandler) {
         const handled = await options.toolHandler(name, parsed);
-        result = handled ?? `Unknown tool: ${name}`;
+        if (handled?.stop) {
+          saveHistory(groupFolder, history);
+          return handled.result;
+        }
+        result = handled?.result ?? `Unknown tool: ${name}`;
       } else {
         result = `Unknown tool: ${name}`;
       }

@@ -478,12 +478,8 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
           toolHandler: async (name, args) => {
             if (name === 'queue_investigation') {
               const issueNum = String(args['issue_number']).replace(/\D/g, '');
-              if (!issueNum) return 'Error: no issue number provided.';
-              // Fire and forget — send acknowledgement, investigation runs in background
-              channel.sendMessage(
-                chatJid,
-                `Fetching issue #${issueNum} and queuing for investigation...`,
-              );
+              if (!issueNum)
+                return { result: 'Error: no issue number provided.' };
               triggerManualInvestigation(issueNum, channel, chatJid).catch(
                 (err) => {
                   logger.error({ issueNum, err }, 'Manual investigation error');
@@ -493,7 +489,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
                   );
                 },
               );
-              return `Issue #${issueNum} queued for investigation.`;
+              return { result: `Issue #${issueNum} queued.`, stop: true };
             }
             return null;
           },
