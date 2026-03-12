@@ -135,6 +135,7 @@ export function startWorkerLoop(
     item: QueuedInvestigation,
     result: QueuedInvestigation['result'],
   ) => Promise<void>,
+  onStart?: (item: QueuedInvestigation) => Promise<void>,
 ): void {
   if (workerLoopStarted) return;
   workerLoopStarted = true;
@@ -159,6 +160,7 @@ export function startWorkerLoop(
       { issueNumber: next.issueNumber, title: next.issueTitle },
       'Investigation queue: starting',
     );
+    await onStart?.(next).catch(() => {});
 
     try {
       const result = await runBugInvestigation(

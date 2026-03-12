@@ -398,6 +398,9 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       ? (lastUserMsg?.content.trim() ?? prompt)
       : lastUserMsg!.content.trim().replace(ollamaPrefix, '');
     await channel.setTyping?.(chatJid, true);
+    if (chatJid === TELEGRAM_OLLAMA_JID) {
+      await channel.sendMessage(chatJid, '👍');
+    }
     try {
       if (chatJid === SLACK_INTAKE_JID) {
         const userMessages = missedMessages.filter((m) => !m.is_from_me);
@@ -906,9 +909,17 @@ async function main(): Promise<void> {
       if (!telegramChannel) return;
       const msg =
         result?.type === 'fixed'
-          ? `Investigation complete for #${item.issueNumber}: PR filed at ${result.prUrl}`
-          : `Investigation complete for #${item.issueNumber}: assigned to Copilot. ${result?.type === 'assigned' ? result.summary : ''}`;
+          ? `✅ #${item.issueNumber} fixed — PR: ${result.prUrl}`
+          : `🔍 #${item.issueNumber} assigned to Copilot. ${result?.type === 'assigned' ? result.summary : ''}`;
       await telegramChannel.sendMessage(TELEGRAM_OLLAMA_JID, msg);
+    },
+    async (item) => {
+      const telegramChannel = findChannel(channels, TELEGRAM_OLLAMA_JID);
+      if (!telegramChannel) return;
+      await telegramChannel.sendMessage(
+        TELEGRAM_OLLAMA_JID,
+        `🔎 Investigating #${item.issueNumber}: ${item.issueTitle}`,
+      );
     },
   );
   startMessageLoop().catch((err) => {
