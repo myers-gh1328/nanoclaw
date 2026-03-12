@@ -18,7 +18,7 @@ const OLLAMA_HOST =
   process.env.OLLAMA_HOST || envConfig.OLLAMA_HOST || 'http://localhost:11434';
 const OLLAMA_MODEL =
   process.env.OLLAMA_MODEL || envConfig.OLLAMA_MODEL || 'llama3.1:8b';
-const MAX_HISTORY = 20;
+const MAX_HISTORY = 100;
 const MAX_TOOL_ITERATIONS = 20;
 
 interface ToolCall {

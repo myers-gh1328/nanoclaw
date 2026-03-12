@@ -53,7 +53,7 @@ import {
   shouldDropMessage,
 } from './sender-allowlist.js';
 import { startSchedulerLoop } from './task-scheduler.js';
-import { runOllamaAgent } from './ollama-agent.js';
+import { executeBash, runOllamaAgent } from './ollama-agent.js';
 import {
   runSlackIntakeAgent,
   parseApprovalReply,
@@ -168,26 +168,20 @@ async function triggerManualInvestigation(
   telegramJid: string,
 ): Promise<void> {
   const ghToken = await getGithubToken();
-  const ghEnv: Record<string, string> = {
-    ...(process.env as Record<string, string>),
-  };
-  if (ghToken) {
-    ghEnv.GH_TOKEN = ghToken;
-    ghEnv.GITHUB_TOKEN = ghToken;
-  }
 
-  // Fetch issue details from GitHub
-  const { execSync } = await import('child_process');
   let issueJson: string;
   try {
-    issueJson = execSync(
+    issueJson = await executeBash(
       `gh issue view ${issueNum} --repo myers-gh1328/Invoicing --json title,body,labels`,
-      { env: ghEnv, encoding: 'utf-8', timeout: 30_000 },
+      process.cwd(),
+      ghToken,
     );
+    if (issueJson.startsWith('Error:')) throw new Error(issueJson);
   } catch (err) {
+    logger.error({ issueNum, err }, 'Failed to fetch issue for investigation');
     await telegramChannel.sendMessage(
       telegramJid,
-      `Could not fetch issue #${issueNum} — does it exist?`,
+      `Could not fetch issue #${issueNum}: ${err instanceof Error ? err.message : String(err)}`,
     );
     return;
   }

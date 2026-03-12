@@ -335,20 +335,25 @@ export async function runBugInvestigation(
     `Repository: ${INVOICING_PATH}\n` +
     `GitHub repo: ${INVOICING_REPO}\n\n` +
     `INSTRUCTIONS:\n` +
-    `1. Start by reading ${INVOICING_PATH}/docs/triage-index.md — it contains the triage workflow, system architecture overview, and links to all other docs. Follow its recommended workflow: customer-language-map → known-issue-signatures → triage-rules.yaml → where-to-look-for-evidence. Read whichever of those docs are relevant to this bug before searching code.\n` +
-    `2. IF you find the root cause and can confidently fix it:\n` +
+    `1. Start by reading ${INVOICING_PATH}/docs/triage-index.md — it contains the triage workflow, system architecture overview, and links to all other docs. Follow its recommended workflow: customer-language-map → known-issue-signatures → triage-rules.yaml → where-to-look-for-evidence. Read whichever docs are relevant before searching code.\n` +
+    `2. Search the codebase thoroughly. Use grep, git log, git blame, and read_file. Start broad, then narrow down. Read the actual file contents around any matches — do not assume from filenames alone.\n` +
+    `3. CRITICAL — once you have found the relevant code:\n` +
+    `   - Do NOT stop and say you could not find it. If you found the file and line, you found it.\n` +
+    `   - Do NOT say "I am not confident" if you can read the code and understand what it does wrong.\n` +
+    `   - Attempt a fix. An imperfect fix that gets reviewed is better than no fix.\n` +
+    `4. IF you attempt a fix:\n` +
     `   a. git checkout -b ${branchName}\n` +
     `   b. Apply the fix using write_file\n` +
     `   c. git add and git commit -m "Fix: ${issue.title} (closes #${issueNumber})"\n` +
     `   d. git push -u origin ${branchName}\n` +
     `   e. gh pr create --repo ${INVOICING_REPO} --title "Fix: ${issue.title}" --body "Closes #${issueNumber}" --head ${branchName}\n` +
-    `   f. Post a review request: gh pr comment <pr-number> --repo ${INVOICING_REPO} --body "@copilot please review this fix"\n` +
-    `   g. End your summary with: RESULT:FIXED:<pr-url>\n` +
-    `3. IF you cannot confidently locate or fix the bug after thorough investigation:\n` +
-    `   a. Post your findings: gh issue comment ${issueNumber} --repo ${INVOICING_REPO} --body "Investigation findings: <what you searched and found>"\n` +
-    `   b. Assign to Copilot: gh issue edit ${issueNumber} --repo ${INVOICING_REPO} --add-assignee copilot\n` +
-    `   c. End your summary with: RESULT:ASSIGNED:<one line summary of what you found>\n\n` +
-    `Be thorough. You have plenty of iterations. Do not give up after a few searches.`;
+    `   f. gh pr comment <pr-number> --repo ${INVOICING_REPO} --body "@copilot please review this fix"\n` +
+    `   g. End your final message with: RESULT:FIXED:<pr-url>\n` +
+    `5. ONLY IF you have searched extensively and truly cannot locate any relevant code:\n` +
+    `   a. gh issue comment ${issueNumber} --repo ${INVOICING_REPO} --body "Investigation findings: <what you searched and found>"\n` +
+    `   b. gh issue edit ${issueNumber} --repo ${INVOICING_REPO} --add-assignee copilot\n` +
+    `   c. End your final message with: RESULT:ASSIGNED:<one line summary>\n\n` +
+    `You have up to 30 minutes and 500 iterations. Be persistent. Finding the code is the hard part — once you see it, fix it.`;
 
   logger.info(
     { issueNumber, title: issue.title, groupFolder },
