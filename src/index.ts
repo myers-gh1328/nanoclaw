@@ -373,24 +373,6 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
         return true;
       }
 
-      // Trigger manual investigation: "investigate #123"
-      const investigateMatch = /^investigate\s+#?(\d+)/i.exec(text);
-      if (investigateMatch) {
-        const issueNum = investigateMatch[1];
-        await channel.sendMessage(
-          chatJid,
-          `Fetching issue #${issueNum} and starting investigation...`,
-        );
-        triggerManualInvestigation(issueNum, channel, chatJid).catch((err) => {
-          logger.error({ issueNum, err }, 'Manual investigation error');
-          channel.sendMessage(
-            chatJid,
-            `Investigation error: ${err instanceof Error ? err.message : String(err)}`,
-          );
-        });
-        return true;
-      }
-
       // Queue status command
       if (/^queue$/i.test(text)) {
         await channel.sendMessage(chatJid, formatQueueStatus());
@@ -462,6 +444,58 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
             );
           }
         }
+      } else if (chatJid === TELEGRAM_OLLAMA_JID) {
+        const reply = await runOllamaAgent(text, group.folder, {
+          systemPrompt:
+            `You are a control assistant for the Invoicing bug intake system. ` +
+            `You can answer questions about the queue and help the user manage investigations.\n\n` +
+            `If the user wants to investigate a GitHub issue — in any phrasing — call the queue_investigation tool with the issue number.\n` +
+            `If the user asks about queue status, reply with the current queue state.\n` +
+            `Do not attempt to investigate issues yourself using bash or any other tool.`,
+          extraTools: [
+            {
+              type: 'function',
+              function: {
+                name: 'queue_investigation',
+                description:
+                  'Queue a GitHub issue for automated investigation. Use this whenever the user asks to investigate, look into, fix, or check any issue.',
+                parameters: {
+                  type: 'object',
+                  properties: {
+                    issue_number: {
+                      type: 'string',
+                      description: 'The GitHub issue number to investigate',
+                    },
+                  },
+                  required: ['issue_number'],
+                },
+              },
+            },
+          ],
+          toolHandler: async (name, args) => {
+            if (name === 'queue_investigation') {
+              const issueNum = String(args['issue_number']).replace(/\D/g, '');
+              if (!issueNum) return 'Error: no issue number provided.';
+              // Fire and forget — send acknowledgement, investigation runs in background
+              channel.sendMessage(
+                chatJid,
+                `Fetching issue #${issueNum} and queuing for investigation...`,
+              );
+              triggerManualInvestigation(issueNum, channel, chatJid).catch(
+                (err) => {
+                  logger.error({ issueNum, err }, 'Manual investigation error');
+                  channel.sendMessage(
+                    chatJid,
+                    `Investigation error: ${err instanceof Error ? err.message : String(err)}`,
+                  );
+                },
+              );
+              return `Issue #${issueNum} queued for investigation.`;
+            }
+            return null;
+          },
+        });
+        await channel.sendMessage(chatJid, reply);
       } else {
         const reply = await runOllamaAgent(text, group.folder);
         await channel.sendMessage(chatJid, reply);

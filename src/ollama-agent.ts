@@ -288,7 +288,16 @@ function parseContentToolCall(
 export async function runOllamaAgent(
   text: string,
   groupFolder: string,
-  options?: { maxIterations?: number; maxDurationMs?: number; systemPrompt?: string },
+  options?: {
+    maxIterations?: number;
+    maxDurationMs?: number;
+    systemPrompt?: string;
+    extraTools?: object[];
+    toolHandler?: (
+      name: string,
+      args: Record<string, unknown>,
+    ) => Promise<string | null>;
+  },
 ): Promise<string> {
   if (!histories.has(groupFolder)) {
     histories.set(groupFolder, loadHistory(groupFolder));
@@ -317,8 +326,11 @@ export async function runOllamaAgent(
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         model: OLLAMA_MODEL,
-        messages: [{ role: 'system', content: options?.systemPrompt ?? SYSTEM_PROMPT }, ...history],
-        tools: TOOLS,
+        messages: [
+          { role: 'system', content: options?.systemPrompt ?? SYSTEM_PROMPT },
+          ...history,
+        ],
+        tools: options?.extraTools ? [...TOOLS, ...options.extraTools] : TOOLS,
         stream: false,
       }),
     });
@@ -430,6 +442,9 @@ export async function runOllamaAgent(
         } catch (err) {
           result = `Error reading file: ${err instanceof Error ? err.message : String(err)}`;
         }
+      } else if (options?.toolHandler) {
+        const handled = await options.toolHandler(name, parsed);
+        result = handled ?? `Unknown tool: ${name}`;
       } else {
         result = `Unknown tool: ${name}`;
       }
