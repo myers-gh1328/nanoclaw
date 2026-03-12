@@ -291,6 +291,7 @@ export async function runOllamaAgent(
   options?: {
     maxIterations?: number;
     maxDurationMs?: number;
+    maxToolOutputLength?: number;
     systemPrompt?: string;
     extraTools?: object[];
     toolHandler?: (
@@ -451,6 +452,14 @@ export async function runOllamaAgent(
         result = handled?.result ?? `Unknown tool: ${name}`;
       } else {
         result = `Unknown tool: ${name}`;
+      }
+
+      // Truncate large tool outputs so the model isn't overwhelmed
+      const maxOutput = options?.maxToolOutputLength ?? 8000;
+      if (result.length > maxOutput) {
+        result =
+          result.slice(0, maxOutput) +
+          `\n\n[Output truncated at ${maxOutput} chars — ${result.length - maxOutput} chars omitted. Use a more targeted command to see specific parts.]`;
       }
 
       logger.info(

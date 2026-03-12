@@ -336,7 +336,7 @@ export async function runBugInvestigation(
     `GitHub repo: ${INVOICING_REPO}\n\n` +
     `INSTRUCTIONS:\n` +
     `1. Start by reading ${INVOICING_PATH}/docs/triage-index.md — it contains the triage workflow, system architecture overview, and links to all other docs. Follow its recommended workflow: customer-language-map → known-issue-signatures → triage-rules.yaml → where-to-look-for-evidence. Read whichever docs are relevant before searching code.\n` +
-    `2. Search the codebase thoroughly. Use grep, git log, git blame, and read_file. Start broad, then narrow down. Read the actual file contents around any matches — do not assume from filenames alone.\n` +
+    `2. Search the codebase thoroughly. Use targeted grep commands (grep specific class/method names, not broad terms like 'session' across the whole repo). Use git log, git blame, and read_file. Narrow down to specific files before reading them in full.\n` +
     `3. CRITICAL — once you have found the relevant code:\n` +
     `   - Do NOT stop and say you could not find it. If you found the file and line, you found it.\n` +
     `   - Do NOT say "I am not confident" if you can read the code and understand what it does wrong.\n` +
@@ -363,6 +363,7 @@ export async function runBugInvestigation(
   const reply = await runOllamaAgent(prompt, groupFolder, {
     maxDurationMs: 30 * 60 * 1000,
     maxIterations: 500,
+    maxToolOutputLength: 15000,
   });
 
   const fixedMatch = /RESULT:FIXED:(https?:\/\/\S+)/i.exec(reply);
