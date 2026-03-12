@@ -368,7 +368,18 @@ export async function runBugInvestigation(
 
   const fixedMatch = /RESULT:FIXED:(https?:\/\/\S+)/i.exec(reply);
   if (fixedMatch) {
-    return { type: 'fixed', prUrl: fixedMatch[1] };
+    const prUrl = fixedMatch[1];
+    const prNumber = prUrl.match(/\/pull\/(\d+)/)?.[1];
+    if (prNumber) {
+      await executeBash(
+        `gh pr comment ${prNumber} --repo ${INVOICING_REPO} --body "@copilot please review this fix"`,
+        INVOICING_PATH,
+        ghToken,
+      ).catch((err) =>
+        logger.warn({ prNumber, err }, 'Failed to request Copilot review'),
+      );
+    }
+    return { type: 'fixed', prUrl };
   }
 
   // Model didn't fix it — guarantee the GitHub assignment actually happens
@@ -376,19 +387,26 @@ export async function runBugInvestigation(
   const assignedMatch = /RESULT:ASSIGNED:(.+)/i.exec(reply);
   const summary = assignedMatch ? assignedMatch[1].trim() : reply.slice(0, 300);
 
-  logger.info({ issueNumber }, 'Investigation did not fix — ensuring Copilot assignment');
+  logger.info(
+    { issueNumber },
+    'Investigation did not fix — ensuring Copilot assignment',
+  );
   const findingsBody = `Investigation findings:\n\n${summary}`;
   await executeBash(
     `gh issue comment ${issueNumber} --repo ${INVOICING_REPO} --body ${JSON.stringify(findingsBody)}`,
     INVOICING_PATH,
     ghToken,
-  ).catch((err) => logger.warn({ issueNumber, err }, 'Failed to post investigation comment'));
+  ).catch((err) =>
+    logger.warn({ issueNumber, err }, 'Failed to post investigation comment'),
+  );
 
   await executeBash(
     `gh issue edit ${issueNumber} --repo ${INVOICING_REPO} --add-assignee copilot`,
     INVOICING_PATH,
     ghToken,
-  ).catch((err) => logger.warn({ issueNumber, err }, 'Failed to assign issue to Copilot'));
+  ).catch((err) =>
+    logger.warn({ issueNumber, err }, 'Failed to assign issue to Copilot'),
+  );
 
   return { type: 'assigned', summary };
 }
