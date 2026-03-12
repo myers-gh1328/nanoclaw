@@ -288,7 +288,7 @@ function parseContentToolCall(
 export async function runOllamaAgent(
   text: string,
   groupFolder: string,
-  options?: { maxIterations?: number; maxDurationMs?: number },
+  options?: { maxIterations?: number; maxDurationMs?: number; systemPrompt?: string },
 ): Promise<string> {
   if (!histories.has(groupFolder)) {
     histories.set(groupFolder, loadHistory(groupFolder));
@@ -317,7 +317,7 @@ export async function runOllamaAgent(
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         model: OLLAMA_MODEL,
-        messages: [{ role: 'system', content: SYSTEM_PROMPT }, ...history],
+        messages: [{ role: 'system', content: options?.systemPrompt ?? SYSTEM_PROMPT }, ...history],
         tools: TOOLS,
         stream: false,
       }),

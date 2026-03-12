@@ -12,13 +12,6 @@ import path from 'path';
 import { getGithubToken } from './github-token.js';
 import { logger } from './logger.js';
 import { executeBash, runOllamaAgent } from './ollama-agent.js';
-import { readEnvFile } from './env.js';
-
-const envConfig = readEnvFile(['OLLAMA_HOST', 'OLLAMA_MODEL']);
-const OLLAMA_HOST =
-  process.env.OLLAMA_HOST || envConfig.OLLAMA_HOST || 'http://localhost:11434';
-const OLLAMA_MODEL =
-  process.env.OLLAMA_MODEL || envConfig.OLLAMA_MODEL || 'llama3.1:8b';
 
 const INVOICING_REPO = 'myers-gh1328/Invoicing';
 const INVOICING_PATH = path.join(os.homedir(), 'code', 'Invoicing');
@@ -68,44 +61,6 @@ export function findPendingIssue(
 // ---------------------------------------------------------------------------
 // Per-user intake history
 // ---------------------------------------------------------------------------
-
-function intakeHistoryPath(groupFolder: string, userId: string): string {
-  const safeId = userId.replace(/[^a-zA-Z0-9_-]/g, '_');
-  return path.join(
-    process.cwd(),
-    'groups',
-    groupFolder,
-    'history',
-    `${safeId}.json`,
-  );
-}
-
-interface OllamaMessage {
-  role: 'user' | 'assistant' | 'tool';
-  content: string;
-}
-
-function loadIntakeHistory(
-  groupFolder: string,
-  userId: string,
-): OllamaMessage[] {
-  try {
-    const raw = fs.readFileSync(intakeHistoryPath(groupFolder, userId), 'utf8');
-    return JSON.parse(raw) as OllamaMessage[];
-  } catch {
-    return [];
-  }
-}
-
-function saveIntakeHistory(
-  groupFolder: string,
-  userId: string,
-  history: OllamaMessage[],
-): void {
-  const filePath = intakeHistoryPath(groupFolder, userId);
-  fs.mkdirSync(path.dirname(filePath), { recursive: true });
-  fs.writeFileSync(filePath, JSON.stringify(history, null, 2));
-}
 
 // ---------------------------------------------------------------------------
 // Approval / notification helpers
@@ -220,38 +175,26 @@ function extractAllDraftJsons(content: string): DraftJson[] {
 // Intake system prompt
 // ---------------------------------------------------------------------------
 
-const INTAKE_SYSTEM_PROMPT = `You are an intake assistant for an invoicing app called Invoicing. Your job is to screen bug reports and feature requests submitted via Slack and help turn them into well-formed GitHub issues.
+const INTAKE_SYSTEM_PROMPT = `You are an intake assistant for the Invoicing app. Users submit bug reports and feature requests via Slack. Your job is to gather enough information to file a high-quality GitHub issue.
 
-App feature areas (use these to classify and label reports):
-- Pricing: pricing flow, pricing wizard, pricing timeline, pricing history, caching strategy, conflict validation
-- Class Type Wizard: readability enhancements, wizard UI
-- Azure Functions: integration, testing
-- AI Assistant: per-tenant toggle, Azure AI Foundry / Foundry Local integration, invoice generation, scheduling insights
-- General invoicing: invoice creation, tenant management, scheduling, reporting
+START: Read ${INVOICING_PATH}/docs/triage-index.md first — it has the system overview and links to all triage docs. Then read whichever of these are relevant to the report:
+- customer-language-map.md — translate vague customer phrases to technical meaning
+- triage-follow-up-questions.md — the right questions to ask per symptom class
+- known-issue-signatures.md — recognize recurring known issues
 
-When a user submits a report, you must decide ONE of two things:
+After reading the relevant docs, respond with EXACTLY ONE of:
 
-1. ASK A CLARIFYING QUESTION — if the report is missing critical information:
-   - For bugs: missing reproduction steps, unclear what went wrong, no platform/browser/version info when relevant
-   - For features: no clear problem being solved, too vague to act on
-   Ask ONE specific question. Be brief and friendly. Do not explain your reasoning.
+A) QUESTIONS — if the report needs more information. Use triage-follow-up-questions.md to pick the 2-4 most useful questions for the symptom. Be conversational and friendly.
 
-2. DRAFT AN ISSUE — if you have enough information to create a useful GitHub issue.
-   Output a JSON object wrapped in <draft> tags for each distinct issue:
-   <draft>{"title": "...", "type": "bug" or "enhancement", "body": "...", "labels": ["bug"] or ["enhancement"]}</draft>
+B) DRAFT — if you have enough to file a useful issue. Use the language map to fill in implied technical context.
+   <draft>{"title": "...", "type": "bug" or "enhancement", "body": "...", "labels": [...]}</draft>
+   Body format for bugs: ## Description, ## Steps to Reproduce, ## Expected Behavior, ## Actual Behavior, ## Likely Subsystem
+   Body format for features: ## Problem, ## Proposed Solution
+   One <draft> per distinct issue. Do not invent facts the user didn't provide.
 
-   If the user describes multiple distinct issues in one message, output one <draft> block per issue.
-   If all issues are related, file them as one. Use judgment.
+C) REDIRECT — if the message is off-topic: "This channel is for bug reports and feature requests for the Invoicing app."
 
-   The body should be formatted markdown with:
-   - For bugs: ## Description, ## Steps to Reproduce, ## Expected Behavior, ## Actual Behavior
-   - For features: ## Problem, ## Proposed Solution
-   Fill in what you know. Do not make up information the user didn't provide.
-
-RULES:
-- Never use tools. Never write code. Never explain your process.
-- Output either a clarifying question (plain text) OR one or more <draft> blocks. Nothing else.
-- If the message is not a bug report or feature request (e.g. "hello", spam, off-topic), reply with a brief polite redirect: "This channel is for bug reports and feature requests for the Invoicing app."`;
+Output ONLY the questions, draft(s), or redirect. No explanations, no preamble.`;
 
 // ---------------------------------------------------------------------------
 // Intake agent
@@ -268,40 +211,23 @@ export async function runSlackIntakeAgent(
   | { type: 'drafted'; issues: PendingIssue[] }
   | { type: 'redirect'; message: string }
 > {
-  const history = loadIntakeHistory(groupFolder, userId);
-  history.push({ role: 'user', content: text });
+  // Use per-user subfolder so each reporter gets isolated conversation history
+  const safeId = userId.replace(/[^a-zA-Z0-9_-]/g, '_');
+  const userFolder = `${groupFolder}/history/${safeId}`;
 
   logger.info(
     { groupFolder, reporterName, userId },
     'Slack intake: evaluating report',
   );
 
-  const response = await fetch(`${OLLAMA_HOST}/api/chat`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      model: OLLAMA_MODEL,
-      messages: [{ role: 'system', content: INTAKE_SYSTEM_PROMPT }, ...history],
-      stream: false,
-    }),
+  const reply = await runOllamaAgent(text, userFolder, {
+    systemPrompt: INTAKE_SYSTEM_PROMPT,
   });
-
-  if (!response.ok) {
-    throw new Error(
-      `Ollama API error: ${response.status} ${response.statusText}`,
-    );
-  }
-
-  const data = (await response.json()) as { message: { content: string } };
-  const reply = data.message.content.trim();
 
   logger.info(
     { groupFolder, reply: reply.slice(0, 200) },
     'Slack intake: raw reply',
   );
-
-  history.push({ role: 'assistant', content: reply });
-  saveIntakeHistory(groupFolder, userId, history);
 
   const draftJsons = extractAllDraftJsons(reply);
   if (draftJsons.length > 0) {
@@ -408,14 +334,8 @@ export async function runBugInvestigation(
     `${issue.body}\n\n` +
     `Repository: ${INVOICING_PATH}\n` +
     `GitHub repo: ${INVOICING_REPO}\n\n` +
-    `Documentation: ${INVOICING_PATH}/docs/ — read relevant docs before diving into code. Available docs:\n` +
-    `  - pricing-flow-review.md, pricing-timeline-architecture.md, pricing-caching-strategy.md\n` +
-    `  - pricing-history-requirements.md, pricing_conflict_validation.md\n` +
-    `  - classtype-wizard-readability-enhancements.md\n` +
-    `  - AZURE_FUNCTIONS_INTEGRATION_TESTING.md\n` +
-    `  - ai-assistant-setup.md\n\n` +
     `INSTRUCTIONS:\n` +
-    `1. Read any docs relevant to the bug area first (use read_file). Then search the codebase to find the root cause. Use grep, git log, git blame, and read_file strategically — start with keywords from the bug description, find the relevant files, then read them.\n` +
+    `1. Start by reading ${INVOICING_PATH}/docs/triage-index.md — it contains the triage workflow, system architecture overview, and links to all other docs. Follow its recommended workflow: customer-language-map → known-issue-signatures → triage-rules.yaml → where-to-look-for-evidence. Read whichever of those docs are relevant to this bug before searching code.\n` +
     `2. IF you find the root cause and can confidently fix it:\n` +
     `   a. git checkout -b ${branchName}\n` +
     `   b. Apply the fix using write_file\n` +
