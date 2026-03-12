@@ -11,10 +11,7 @@ import path from 'path';
 
 import { getGithubToken } from './github-token.js';
 import { logger } from './logger.js';
-import {
-  executeBash,
-  runOllamaAgent,
-} from './ollama-agent.js';
+import { executeBash, runOllamaAgent } from './ollama-agent.js';
 import { readEnvFile } from './env.js';
 
 const envConfig = readEnvFile(['OLLAMA_HOST', 'OLLAMA_MODEL']);
@@ -74,7 +71,13 @@ export function findPendingIssue(
 
 function intakeHistoryPath(groupFolder: string, userId: string): string {
   const safeId = userId.replace(/[^a-zA-Z0-9_-]/g, '_');
-  return path.join(process.cwd(), 'groups', groupFolder, 'history', `${safeId}.json`);
+  return path.join(
+    process.cwd(),
+    'groups',
+    groupFolder,
+    'history',
+    `${safeId}.json`,
+  );
 }
 
 interface OllamaMessage {
@@ -82,7 +85,10 @@ interface OllamaMessage {
   content: string;
 }
 
-function loadIntakeHistory(groupFolder: string, userId: string): OllamaMessage[] {
+function loadIntakeHistory(
+  groupFolder: string,
+  userId: string,
+): OllamaMessage[] {
   try {
     const raw = fs.readFileSync(intakeHistoryPath(groupFolder, userId), 'utf8');
     return JSON.parse(raw) as OllamaMessage[];
@@ -91,7 +97,11 @@ function loadIntakeHistory(groupFolder: string, userId: string): OllamaMessage[]
   }
 }
 
-function saveIntakeHistory(groupFolder: string, userId: string, history: OllamaMessage[]): void {
+function saveIntakeHistory(
+  groupFolder: string,
+  userId: string,
+  history: OllamaMessage[],
+): void {
   const filePath = intakeHistoryPath(groupFolder, userId);
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
   fs.writeFileSync(filePath, JSON.stringify(history, null, 2));
@@ -140,15 +150,30 @@ function extractJsonObjects(content: string): string[] {
   const results: string[] = [];
   for (let start = 0; start < content.length; start++) {
     if (content[start] !== '{') continue;
-    let depth = 0, inString = false, escaped = false, end = start;
+    let depth = 0,
+      inString = false,
+      escaped = false,
+      end = start;
     for (; end < content.length; end++) {
       const ch = content[end];
-      if (escaped) { escaped = false; continue; }
-      if (ch === '\\' && inString) { escaped = true; continue; }
-      if (ch === '"') { inString = !inString; continue; }
+      if (escaped) {
+        escaped = false;
+        continue;
+      }
+      if (ch === '\\' && inString) {
+        escaped = true;
+        continue;
+      }
+      if (ch === '"') {
+        inString = !inString;
+        continue;
+      }
       if (inString) continue;
       if (ch === '{') depth++;
-      else if (ch === '}') { depth--; if (depth === 0) break; }
+      else if (ch === '}') {
+        depth--;
+        if (depth === 0) break;
+      }
     }
     if (depth === 0) results.push(content.slice(start, end + 1));
   }
@@ -165,7 +190,9 @@ function parseDraftJson(candidate: string): DraftJson | null {
     ) {
       return parsed as unknown as DraftJson;
     }
-  } catch { /* ignore */ }
+  } catch {
+    /* ignore */
+  }
   return null;
 }
 
@@ -237,7 +264,10 @@ export async function runSlackIntakeAgent(
   const history = loadIntakeHistory(groupFolder, userId);
   history.push({ role: 'user', content: text });
 
-  logger.info({ groupFolder, reporterName, userId }, 'Slack intake: evaluating report');
+  logger.info(
+    { groupFolder, reporterName, userId },
+    'Slack intake: evaluating report',
+  );
 
   const response = await fetch(`${OLLAMA_HOST}/api/chat`, {
     method: 'POST',
@@ -273,7 +303,8 @@ export async function runSlackIntakeAgent(
       slackJid,
       reporterName,
       title: draftJson.title,
-      type: draftJson.type === 'bug' ? ('bug' as const) : ('enhancement' as const),
+      type:
+        draftJson.type === 'bug' ? ('bug' as const) : ('enhancement' as const),
       body: draftJson.body,
       labels: Array.isArray(draftJson.labels)
         ? draftJson.labels
@@ -284,7 +315,11 @@ export async function runSlackIntakeAgent(
     existing.push(...newIssues);
     savePendingIssues(groupFolder, existing);
     logger.info(
-      { groupFolder, count: newIssues.length, titles: newIssues.map((i) => i.title) },
+      {
+        groupFolder,
+        count: newIssues.length,
+        titles: newIssues.map((i) => i.title),
+      },
       'Slack intake: drafted issues',
     );
     return { type: 'drafted', issues: newIssues };
@@ -355,10 +390,9 @@ export async function runBugInvestigation(
   }
 
   // Ensure isolated history folder exists for this investigation
-  fs.mkdirSync(
-    path.join(process.cwd(), 'groups', groupFolder),
-    { recursive: true },
-  );
+  fs.mkdirSync(path.join(process.cwd(), 'groups', groupFolder), {
+    recursive: true,
+  });
 
   const branchName = `fix/issue-${issueNumber}`;
   const prompt =
@@ -383,7 +417,10 @@ export async function runBugInvestigation(
     `   c. End your summary with: RESULT:ASSIGNED:<one line summary of what you found>\n\n` +
     `Be thorough. You have plenty of iterations. Do not give up after a few searches.`;
 
-  logger.info({ issueNumber, title: issue.title, groupFolder }, 'Bug investigation started');
+  logger.info(
+    { issueNumber, title: issue.title, groupFolder },
+    'Bug investigation started',
+  );
 
   const reply = await runOllamaAgent(prompt, groupFolder, {
     maxDurationMs: 30 * 60 * 1000,

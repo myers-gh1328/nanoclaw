@@ -20,7 +20,9 @@ export interface QueuedInvestigation {
   status: 'pending' | 'running' | 'done' | 'failed';
   startedAt?: string;
   completedAt?: string;
-  result?: { type: 'fixed'; prUrl: string } | { type: 'assigned'; summary: string };
+  result?:
+    | { type: 'fixed'; prUrl: string }
+    | { type: 'assigned'; summary: string };
 }
 
 export interface WorkerLoopDeps {
@@ -60,7 +62,10 @@ export function resetRunningItems(): void {
     item.startedAt = undefined;
   }
   saveQueue(queue);
-  logger.info({ count: stuck.length }, 'Investigation queue: reset stuck running items');
+  logger.info(
+    { count: stuck.length },
+    'Investigation queue: reset stuck running items',
+  );
 }
 
 export function addToQueue(
@@ -94,7 +99,9 @@ export function formatQueueStatus(): string {
     const mins = running.startedAt
       ? Math.round((Date.now() - Date.parse(running.startedAt)) / 60_000)
       : 0;
-    lines.push(`▶ Running: #${running.issueNumber} "${running.issueTitle}" (started ${mins}m ago)`);
+    lines.push(
+      `▶ Running: #${running.issueNumber} "${running.issueTitle}" (started ${mins}m ago)`,
+    );
   }
 
   const pending = queue.filter((i) => i.status === 'pending');
@@ -107,7 +114,9 @@ export function formatQueueStatus(): string {
     .sort((a, b) => (b.completedAt ?? '').localeCompare(a.completedAt ?? ''))
     .slice(0, 3);
   if (done.length > 0) {
-    lines.push(`✅ Done (last ${done.length}): ${done.map((i) => `#${i.issueNumber}`).join(', ')}`);
+    lines.push(
+      `✅ Done (last ${done.length}): ${done.map((i) => `#${i.issueNumber}`).join(', ')}`,
+    );
   }
 
   if (!running && pending.length === 0) {
@@ -180,16 +189,29 @@ export function startWorkerLoop(
         item.result = { type: 'assigned', summary: errMsg };
         saveQueue(updated);
       }
-      logger.error({ issueNumber: next.issueNumber, err }, 'Investigation queue: failed');
-      await onComplete(next, { type: 'assigned', summary: errMsg }).catch(() => {});
+      logger.error(
+        { issueNumber: next.issueNumber, err },
+        'Investigation queue: failed',
+      );
+      await onComplete(next, { type: 'assigned', summary: errMsg }).catch(
+        () => {},
+      );
     } finally {
       currentlyRunning = false;
     }
   };
 
-  setInterval(() => { tick().catch((err) => logger.error({ err }, 'Investigation worker tick error')); }, 10_000);
+  setInterval(() => {
+    tick().catch((err) =>
+      logger.error({ err }, 'Investigation worker tick error'),
+    );
+  }, 10_000);
   // Fire first tick soon after startup
-  setTimeout(() => { tick().catch((err) => logger.error({ err }, 'Investigation worker tick error')); }, 2_000);
+  setTimeout(() => {
+    tick().catch((err) =>
+      logger.error({ err }, 'Investigation worker tick error'),
+    );
+  }, 2_000);
 
   logger.info('Investigation queue worker started');
 }

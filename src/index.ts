@@ -377,10 +377,16 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       const investigateMatch = /^investigate\s+#?(\d+)/i.exec(text);
       if (investigateMatch) {
         const issueNum = investigateMatch[1];
-        await channel.sendMessage(chatJid, `Fetching issue #${issueNum} and starting investigation...`);
+        await channel.sendMessage(
+          chatJid,
+          `Fetching issue #${issueNum} and starting investigation...`,
+        );
         triggerManualInvestigation(issueNum, channel, chatJid).catch((err) => {
           logger.error({ issueNum, err }, 'Manual investigation error');
-          channel.sendMessage(chatJid, `Investigation error: ${err instanceof Error ? err.message : String(err)}`);
+          channel.sendMessage(
+            chatJid,
+            `Investigation error: ${err instanceof Error ? err.message : String(err)}`,
+          );
         });
         return true;
       }
@@ -433,7 +439,10 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
                 chatJid,
                 `Got it @${reporterName} — I've drafted an issue and sent it for review.`,
               );
-              const telegramChannel = findChannel(channels, TELEGRAM_OLLAMA_JID);
+              const telegramChannel = findChannel(
+                channels,
+                TELEGRAM_OLLAMA_JID,
+              );
               if (telegramChannel) {
                 for (const issue of result.issues) {
                   await telegramChannel.sendMessage(
@@ -856,15 +865,18 @@ async function main(): Promise<void> {
   });
   queue.setProcessMessagesFn(processGroupMessages);
   recoverPendingMessages();
-  startWorkerLoop({ channels, telegramJid: TELEGRAM_OLLAMA_JID }, async (item, result) => {
-    const telegramChannel = findChannel(channels, TELEGRAM_OLLAMA_JID);
-    if (!telegramChannel) return;
-    const msg =
-      result?.type === 'fixed'
-        ? `Investigation complete for #${item.issueNumber}: PR filed at ${result.prUrl}`
-        : `Investigation complete for #${item.issueNumber}: assigned to Copilot. ${result?.type === 'assigned' ? result.summary : ''}`;
-    await telegramChannel.sendMessage(TELEGRAM_OLLAMA_JID, msg);
-  });
+  startWorkerLoop(
+    { channels, telegramJid: TELEGRAM_OLLAMA_JID },
+    async (item, result) => {
+      const telegramChannel = findChannel(channels, TELEGRAM_OLLAMA_JID);
+      if (!telegramChannel) return;
+      const msg =
+        result?.type === 'fixed'
+          ? `Investigation complete for #${item.issueNumber}: PR filed at ${result.prUrl}`
+          : `Investigation complete for #${item.issueNumber}: assigned to Copilot. ${result?.type === 'assigned' ? result.summary : ''}`;
+      await telegramChannel.sendMessage(TELEGRAM_OLLAMA_JID, msg);
+    },
+  );
   startMessageLoop().catch((err) => {
     logger.fatal({ err }, 'Message loop crashed unexpectedly');
     process.exit(1);
