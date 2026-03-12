@@ -222,6 +222,13 @@ function extractAllDraftJsons(content: string): DraftJson[] {
 
 const INTAKE_SYSTEM_PROMPT = `You are an intake assistant for an invoicing app called Invoicing. Your job is to screen bug reports and feature requests submitted via Slack and help turn them into well-formed GitHub issues.
 
+App feature areas (use these to classify and label reports):
+- Pricing: pricing flow, pricing wizard, pricing timeline, pricing history, caching strategy, conflict validation
+- Class Type Wizard: readability enhancements, wizard UI
+- Azure Functions: integration, testing
+- AI Assistant: per-tenant toggle, Azure AI Foundry / Foundry Local integration, invoice generation, scheduling insights
+- General invoicing: invoice creation, tenant management, scheduling, reporting
+
 When a user submits a report, you must decide ONE of two things:
 
 1. ASK A CLARIFYING QUESTION — if the report is missing critical information:
@@ -401,8 +408,14 @@ export async function runBugInvestigation(
     `${issue.body}\n\n` +
     `Repository: ${INVOICING_PATH}\n` +
     `GitHub repo: ${INVOICING_REPO}\n\n` +
+    `Documentation: ${INVOICING_PATH}/docs/ — read relevant docs before diving into code. Available docs:\n` +
+    `  - pricing-flow-review.md, pricing-timeline-architecture.md, pricing-caching-strategy.md\n` +
+    `  - pricing-history-requirements.md, pricing_conflict_validation.md\n` +
+    `  - classtype-wizard-readability-enhancements.md\n` +
+    `  - AZURE_FUNCTIONS_INTEGRATION_TESTING.md\n` +
+    `  - ai-assistant-setup.md\n\n` +
     `INSTRUCTIONS:\n` +
-    `1. Search the codebase to find the root cause. Use grep, git log, git blame, and read_file strategically — start with keywords from the bug description, find the relevant files, then read them.\n` +
+    `1. Read any docs relevant to the bug area first (use read_file). Then search the codebase to find the root cause. Use grep, git log, git blame, and read_file strategically — start with keywords from the bug description, find the relevant files, then read them.\n` +
     `2. IF you find the root cause and can confidently fix it:\n` +
     `   a. git checkout -b ${branchName}\n` +
     `   b. Apply the fix using write_file\n` +
