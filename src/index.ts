@@ -291,6 +291,25 @@ async function handleIntakeApproval(
       );
       savePendingIssues(SLACK_INTAKE_GROUP_FOLDER, remaining);
       await telegramChannel.sendMessage(telegramJid, reply);
+      // Extract URL and issue number from agent reply so we can notify Slack and queue
+      const url = reply.match(
+        /https:\/\/github\.com\/[^\s]+\/issues\/\d+/,
+      )?.[0];
+      const issueNum = url?.match(/\/issues\/(\d+)/)?.[1];
+      const slackChannel = findChannel(channels, issue.slackJid);
+      if (slackChannel && issueNum) {
+        await slackChannel.sendMessage(
+          issue.slackJid,
+          `@${issue.reporterName} I created issue #${issueNum} for you.`,
+        );
+      }
+      if (issue.type === 'bug' && issueNum) {
+        addToQueue(issueNum, issue.title, issue);
+        await telegramChannel.sendMessage(
+          telegramJid,
+          `Filed and queued for investigation.`,
+        );
+      }
     } catch (err) {
       await telegramChannel.sendMessage(
         telegramJid,
@@ -353,14 +372,15 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   // Check for intake approval replies and investigate commands in the Ollama Telegram bot
   // (must run before the Ollama routing block since tgo: matches isOllamaChat)
   if (chatJid === TELEGRAM_OLLAMA_JID) {
+    // Load once outside the loop — disk read shouldn't happen per-message
+    const pending = loadPendingIssues(SLACK_INTAKE_GROUP_FOLDER);
+    const pendingRefs = pending.map((i) => i.id);
+
+    let commandHandled = false;
     for (const msg of missedMessages) {
       if (msg.is_from_me) continue;
       const text = msg.content.trim();
-      let decision: string | null = null;
-      let ref: string | null = null;
 
-      const pending = loadPendingIssues(SLACK_INTAKE_GROUP_FOLDER);
-      const pendingRefs = pending.map((i) => i.id);
       const parsed =
         pendingRefs.length > 0
           ? await parseIntent<{ decision: string; ref: string }>(
@@ -375,21 +395,19 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
               text,
             )
           : null;
-      if (parsed?.decision && parsed?.ref) {
-        decision = parsed.decision;
-        ref = parsed.ref;
-      }
 
-      if (decision && ref) {
+      if (parsed?.decision && parsed?.ref) {
         await channel.sendMessage(chatJid, 'On it...');
-        await handleIntakeApproval(decision, ref, channel, chatJid);
-        return true;
+        await handleIntakeApproval(parsed.decision, parsed.ref, channel, chatJid);
+        commandHandled = true;
+        continue;
       }
 
       // Queue status command
       if (/^queue$/i.test(text)) {
         await channel.sendMessage(chatJid, formatQueueStatus());
-        return true;
+        commandHandled = true;
+        continue;
       }
 
       // Investigation decision: "manual 227" or "claude 227"
@@ -417,9 +435,11 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
             `Ok, #${issueNum} is on you. I'll leave it open.`,
           );
         }
-        return true;
+        commandHandled = true;
+        continue;
       }
     }
+    if (commandHandled) return true;
   }
 
   // Route to Ollama if:

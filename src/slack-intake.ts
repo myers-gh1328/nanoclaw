@@ -9,7 +9,6 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 
-import { getGithubToken } from './github-token.js';
 import { logger } from './logger.js';
 import {
   clearOllamaHistory,
@@ -332,7 +331,6 @@ export async function applyModificationAndFile(
   modification: string,
   groupFolder: string,
 ): Promise<string> {
-  const ghToken = await getGithubToken();
   const prompt =
     `Apply this modification to the following GitHub issue draft, then file it in the ${INVOICING_REPO} repo using the gh CLI.\n\n` +
     `Modification: ${modification}\n\n` +
