@@ -118,7 +118,9 @@ export function formatQueueStatus(): string {
   const running = queue.find((i) => i.status === 'running');
   if (running) {
     const mins = running.startedAt
-      ? Math.round((Date.now() - new Date(running.startedAt).getTime()) / 60_000)
+      ? Math.round(
+          (Date.now() - new Date(running.startedAt).getTime()) / 60_000,
+        )
       : 0;
     lines.push(
       `▶ Running: #${running.issueNumber} "${running.issueTitle}" (started ${mins}m ago)`,
@@ -184,7 +186,10 @@ export function startWorkerLoop(
       'Investigation queue: starting',
     );
     await onStart?.(next).catch((err) =>
-      logger.warn({ err, issueNumber: next.issueNumber }, 'Failed to send investigation start notification'),
+      logger.warn(
+        { err, issueNumber: next.issueNumber },
+        'Failed to send investigation start notification',
+      ),
     );
 
     try {
@@ -220,8 +225,12 @@ export function startWorkerLoop(
         { issueNumber: next.issueNumber, err },
         'Investigation queue: failed',
       );
-      await onComplete(next, { type: 'assigned', summary: errMsg }).catch((err) =>
-        logger.warn({ err, issueNumber: next.issueNumber }, 'Failed to send investigation complete notification'),
+      await onComplete(next, { type: 'assigned', summary: errMsg }).catch(
+        (err) =>
+          logger.warn(
+            { err, issueNumber: next.issueNumber },
+            'Failed to send investigation complete notification',
+          ),
       );
     } finally {
       currentlyRunning = false;

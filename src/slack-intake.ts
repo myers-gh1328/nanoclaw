@@ -309,7 +309,9 @@ export async function fileGithubIssue(
     validLabels = [];
   }
 
-  const labelsArg = validLabels.map((l) => `--label ${JSON.stringify(l)}`).join(' ');
+  const labelsArg = validLabels
+    .map((l) => `--label ${JSON.stringify(l)}`)
+    .join(' ');
   const tmpBody = path.join(os.tmpdir(), `nanoclaw-issue-${issue.id}.md`);
   fs.writeFileSync(tmpBody, issue.body, 'utf8');
   const cmd = `gh issue create --repo ${INVOICING_REPO} --title ${JSON.stringify(issue.title)} --body-file ${tmpBody} ${labelsArg}`;
@@ -317,7 +319,11 @@ export async function fileGithubIssue(
     const result = await executeBash(cmd, INVOICING_PATH, ghToken);
     return result;
   } finally {
-    try { fs.unlinkSync(tmpBody); } catch { /* already gone */ }
+    try {
+      fs.unlinkSync(tmpBody);
+    } catch {
+      /* already gone */
+    }
   }
 }
 
