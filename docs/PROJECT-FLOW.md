@@ -9,10 +9,10 @@ This document describes the complete flow of this NanoClaw installation. It cove
 This is a personal NanoClaw installation running on a Mac Mini. It connects three messaging channels to a set of AI agents that triage bug reports, investigate issues, and file GitHub PRs for the Invoicing .NET web app.
 
 **Channels:**
-- **Slack** (`slack:C0AL0D2K79R`) — where the Invoicing app's users report bugs via chat
+- **Slack** — where the Invoicing app's users report bugs via chat
 - **Telegram @Agent47pi_bot** (`tg:` prefix) — admin/control channel, runs Claude container agent
 - **Telegram @Mikeollamabot** (`tgo:` prefix) — Ollama control channel + bug intake notifications
-- **Telegram "Bugs" group** (`tgo:-5191721027`) — receives structured bug reports from the .NET app
+- **Telegram "Bugs" group** (`tgo:` prefix, negative ID) — receives structured bug reports from the .NET app
 
 **Agents:**
 - **Claude container agent** — full Claude via Agent SDK, runs in Apple Container (Linux VM)
@@ -25,12 +25,14 @@ This is a personal NanoClaw installation running on a Mac Mini. It connects thre
 
 ## Registered Groups
 
-| JID | Name | Channel | Agent | Trigger Required |
-|-----|------|---------|-------|-----------------|
-| `tg:8388828787` | Main (admin) | Telegram Claude bot | Claude container | No |
-| `tgo:8388828787` | Ollama | Telegram Ollama bot | Ollama | No |
-| `slack:C0AL0D2K79R` | Bug Reports | Slack | Ollama intake | No |
-| `tgo:-5191721027` | Bug Intake | Telegram Ollama bot | Ollama intake | No |
+| Name | Channel | Agent | Trigger Required |
+|------|---------|-------|-----------------|
+| Main (admin) | Telegram Claude bot | Claude container | No |
+| Ollama | Telegram Ollama bot | Ollama | No |
+| Bug Reports | Slack | Ollama intake | No |
+| Bug Intake | Telegram Ollama bot | Ollama intake | No |
+
+Group JIDs and channel IDs are stored in the SQLite database and `.env`, not in this document.
 
 ---
 
@@ -48,7 +50,7 @@ The message loop polls SQLite every `POLL_INTERVAL` ms for new messages in regis
 
 ---
 
-### 2. Path A — Admin Telegram Chat (`tg:8388828787`)
+### 2. Path A — Admin Telegram Chat
 
 **Trigger:** Any message to @Agent47pi_bot (no trigger word required — it's the main group)
 
@@ -69,7 +71,7 @@ This is the full-power agent. Can do anything: write code, manage tasks, registe
 
 ---
 
-### 3. Path B — Ollama Chat (`tgo:8388828787`)
+### 3. Path B — Ollama Chat
 
 **Trigger:** Any message to @Mikeollamabot
 
@@ -108,7 +110,7 @@ Message → runOllamaAgent(llama3.2:1b, 4096 ctx)
 
 ---
 
-### 4. Path C — Slack Bug Reports (`slack:C0AL0D2K79R`)
+### 4. Path C — Slack Bug Reports
 
 **Trigger:** Any message in the Slack #bug-reports channel
 
@@ -131,7 +133,7 @@ Message → "Thanks @reporter, reviewing your report..." (immediate ack)
 
 ---
 
-### 5. Path D — Telegram Bug Intake Group (`tgo:-5191721027`)
+### 5. Path D — Telegram Bug Intake Group
 
 **Trigger:** Any message posted to the "Bugs" Telegram group
 
@@ -224,16 +226,13 @@ Tasks stored in SQLite (`store/messages.db`, `scheduled_tasks` table). Scheduler
 **Ollama tasks:** call `runOllamaAgent()` directly, send result to chat_jid
 
 **Current tasks:**
-- Morning briefing: cron `0 7 * * *`, Ollama, sends to `tgo:8388828787`
+- Morning briefing: cron `0 7 * * *`, Ollama, sends to Ollama chat
 
 ---
 
 ## GitHub Token Refresh
 
-GitHub tokens are short-lived (GitHub App installation tokens, ~1 hour). The app generates them on-demand via `getGithubToken()` in `src/github-token.ts` using:
-- App ID: `3068016`
-- Install ID: `115682233`
-- PEM: `~/github-app.pem`
+GitHub tokens are short-lived (GitHub App installation tokens, ~1 hour). The app generates them on-demand via `getGithubToken()` in `src/github-token.ts` using the App ID, Install ID, and PEM file stored outside the repo.
 
 A refresh script at `~/bin/gh-refresh-token` updates all `~/code` repo remote URLs with a fresh token. Run it manually before any git operations if authentication fails.
 
@@ -259,7 +258,7 @@ A refresh script at `~/bin/gh-refresh-token` updates all `~/code` repo remote UR
 
 | System | Purpose | Auth |
 |--------|---------|------|
-| GitHub (`myers-gh1328/Invoicing`) | Issues, PRs, labels | GitHub App (PEM + App ID) |
+| GitHub (Invoicing repo) | Issues, PRs, labels | GitHub App (PEM + App ID, stored outside repo) |
 | Slack workspace | Bug reports from users | Slack bot token (`.env`) |
 | Telegram | Admin chat, Ollama chat, bug intake group | Bot tokens (`.env`) |
 | Ollama (`localhost:11434`) | Local model inference | None (local) |
