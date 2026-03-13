@@ -9,58 +9,28 @@ import os from 'os';
 import { logger } from './logger.js';
 
 /** The container runtime binary name. */
-export const CONTAINER_RUNTIME_BIN = 'container';
+export const CONTAINER_RUNTIME_BIN =
+  process.env.CONTAINER_RUNTIME_BIN ||
+  '/Applications/Docker.app/Contents/Resources/bin/docker';
 
 /**
- * Hostname/IP containers use to reach the host machine.
- * Apple Container (macOS): uses the bridge101 gateway IP (192.168.65.1).
- * Detected at startup from host network interfaces; falls back to 192.168.65.1.
+ * Hostname containers use to reach the host machine.
+ * Docker Desktop (macOS): host.docker.internal resolves to the host automatically.
  */
-export const CONTAINER_HOST_GATEWAY = detectHostGateway();
+export const CONTAINER_HOST_GATEWAY =
+  process.env.CONTAINER_HOST_GATEWAY || 'host.docker.internal';
 
 /**
  * Address the credential proxy binds to.
- * Apple Container (macOS): bind to the bridge IP so containers can reach it.
- * Linux: bind to 0.0.0.0 as fallback.
  */
 export const PROXY_BIND_HOST =
-  process.env.CREDENTIAL_PROXY_HOST || detectProxyBindHost();
-
-function detectHostGateway(): string {
-  // Apple Container bridge interfaces act as gateway (.1 address) for container VMs.
-  // Sort bridges descending by number so bridge101 beats bridge100 (Apple Container
-  // uses higher-numbered bridges; lower-numbered ones may be VMware/Parallels).
-  const ifaces = os.networkInterfaces();
-  const bridges = Object.entries(ifaces)
-    .filter(([name]) => name.startsWith('bridge'))
-    .sort(([a], [b]) => {
-      const numA = parseInt(a.replace('bridge', ''), 10) || 0;
-      const numB = parseInt(b.replace('bridge', ''), 10) || 0;
-      return numB - numA;
-    });
-  for (const [, addrs] of bridges) {
-    if (!addrs) continue;
-    const ipv4 = addrs.find(
-      (a) =>
-        a.family === 'IPv4' &&
-        a.address.startsWith('192.168.') &&
-        a.address.endsWith('.1'),
-    );
-    if (ipv4) return ipv4.address;
-  }
-  return '192.168.65.1';
-}
-
-function detectProxyBindHost(): string {
-  // Bind to all interfaces so Apple Container VMs can reach the proxy.
-  // On a personal Mac this is safe; the credential proxy requires a valid token.
-  if (os.platform() === 'darwin') return '0.0.0.0';
-  return '0.0.0.0';
-}
+  process.env.CREDENTIAL_PROXY_HOST || '0.0.0.0';
 
 /** CLI args needed for the container to resolve the host gateway. */
 export function hostGatewayArgs(): string[] {
-  return [];
+  // Docker Desktop on macOS provides host.docker.internal automatically,
+  // but --add-host ensures it works on Linux Docker too.
+  return ['--add-host', 'host.docker.internal:host-gateway'];
 }
 
 /** Returns CLI args for a readonly bind mount. */
@@ -82,27 +52,12 @@ export function stopContainer(name: string): string {
 /** Ensure the container runtime is running, starting it if needed. */
 export function ensureContainerRuntimeRunning(): void {
   try {
-    execSync(`${CONTAINER_RUNTIME_BIN} system status`, { stdio: 'pipe' });
+    execSync(`${CONTAINER_RUNTIME_BIN} info`, { stdio: 'pipe' });
     logger.debug('Container runtime already running');
-    return;
-  } catch {
-    // Not running — try to start it
-  }
-
-  logger.info('Starting container runtime...');
-  try {
-    execSync(`${CONTAINER_RUNTIME_BIN} system start`, {
-      stdio: 'pipe',
-      timeout: 30000,
-    });
-    logger.info('Container runtime started');
   } catch (err) {
-    // Container runtime unavailable (e.g. XPC session not ready at boot).
-    // Log a warning but don't crash — Ollama agent works without containers,
-    // and Claude agent requests will fail gracefully if containers are needed.
     logger.warn(
       { err },
-      'Container runtime unavailable at startup — Claude agent will be unavailable until it is running',
+      'Docker daemon unavailable — Claude agent will be unavailable until Docker Desktop is running',
     );
   }
 }
@@ -110,18 +65,14 @@ export function ensureContainerRuntimeRunning(): void {
 /** Kill orphaned NanoClaw containers from previous runs. */
 export function cleanupOrphans(): void {
   try {
-    const output = execSync(`${CONTAINER_RUNTIME_BIN} ls --format json`, {
-      stdio: ['pipe', 'pipe', 'pipe'],
-      encoding: 'utf-8',
-    });
-    const containers: { status: string; configuration: { id: string } }[] =
-      JSON.parse(output || '[]');
-    const orphans = containers
-      .filter(
-        (c) =>
-          c.status === 'running' && c.configuration.id.startsWith('nanoclaw-'),
-      )
-      .map((c) => c.configuration.id);
+    const output = execSync(
+      `${CONTAINER_RUNTIME_BIN} ps --filter name=nanoclaw- --format '{{.Names}}'`,
+      { stdio: ['pipe', 'pipe', 'pipe'], encoding: 'utf-8' },
+    );
+    const orphans = output
+      .split('\n')
+      .map((n) => n.trim())
+      .filter((n) => n.startsWith('nanoclaw-'));
     for (const name of orphans) {
       try {
         execSync(stopContainer(name), { stdio: 'pipe' });

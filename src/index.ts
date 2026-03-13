@@ -39,6 +39,7 @@ import {
   setRegisteredGroup,
   setRouterState,
   setSession,
+  deleteSession,
   storeChatMetadata,
   storeMessage,
 } from './db.js';
@@ -86,6 +87,7 @@ let lastTimestamp = '';
 let sessions: Record<string, string> = {};
 let registeredGroups: Record<string, RegisteredGroup> = {};
 let lastAgentTimestamp: Record<string, string> = {};
+const acknowledgedTimestamp: Record<string, string> = {};
 let messageLoopRunning = false;
 
 const channels: Channel[] = [];
@@ -100,6 +102,12 @@ function loadState(): void {
     logger.warn('Corrupted last_agent_timestamp in DB, resetting');
     lastAgentTimestamp = {};
   }
+  const ackedTs = getRouterState('acknowledged_timestamp');
+  try {
+    Object.assign(acknowledgedTimestamp, ackedTs ? JSON.parse(ackedTs) : {});
+  } catch {
+    /* ignore */
+  }
   sessions = getAllSessions();
   registeredGroups = getAllRegisteredGroups();
   logger.info(
@@ -111,6 +119,7 @@ function loadState(): void {
 function saveState(): void {
   setRouterState('last_timestamp', lastTimestamp);
   setRouterState('last_agent_timestamp', JSON.stringify(lastAgentTimestamp));
+  setRouterState('acknowledged_timestamp', JSON.stringify(acknowledgedTimestamp));
 }
 
 function registerGroup(jid: string, group: RegisteredGroup): void {
@@ -241,9 +250,9 @@ async function handleIntakeApproval(
       );
     }
   } else if (lower === 'yes') {
-    savePendingIssues(SLACK_INTAKE_GROUP_FOLDER, remaining);
     try {
       const url = await fileGithubIssue(issue, ghToken);
+      savePendingIssues(SLACK_INTAKE_GROUP_FOLDER, remaining);
       await telegramChannel.sendMessage(telegramJid, `Filed: ${url}`);
       const issueNum = url.trim().match(/\/issues\/(\d+)/)?.[1];
       const slackChannel = findChannel(channels, issue.slackJid);
@@ -270,13 +279,13 @@ async function handleIntakeApproval(
   } else {
     // "yes but X"
     const modification = decision.replace(/^yes but\s+/i, '').trim();
-    savePendingIssues(SLACK_INTAKE_GROUP_FOLDER, remaining);
     try {
       const reply = await applyModificationAndFile(
         issue,
         modification,
         SLACK_INTAKE_GROUP_FOLDER,
       );
+      savePendingIssues(SLACK_INTAKE_GROUP_FOLDER, remaining);
       await telegramChannel.sendMessage(telegramJid, reply);
     } catch (err) {
       await telegramChannel.sendMessage(
@@ -393,7 +402,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       : lastUserMsg!.content.trim().replace(ollamaPrefix, '');
     await channel.setTyping?.(chatJid, true);
     if (chatJid === TELEGRAM_OLLAMA_JID) {
-      await channel.sendMessage(chatJid, '👍');
+      await channel.sendMessage(chatJid, 'Routing message to agent...');
     }
     try {
       if (chatJid === SLACK_INTAKE_JID) {
@@ -488,10 +497,10 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
             return null;
           },
         });
-        await channel.sendMessage(chatJid, reply);
+        if (reply) await channel.sendMessage(chatJid, reply);
       } else {
         const reply = await runOllamaAgent(text, group.folder);
-        await channel.sendMessage(chatJid, reply);
+        if (reply) await channel.sendMessage(chatJid, reply);
       }
     } catch (err) {
       logger.error({ group: group.name, err }, 'Ollama agent error');
@@ -516,6 +525,11 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     }, IDLE_TIMEOUT);
   };
 
+  const latestTimestamp = missedMessages[missedMessages.length - 1].timestamp;
+  if (acknowledgedTimestamp[chatJid] !== latestTimestamp) {
+    acknowledgedTimestamp[chatJid] = latestTimestamp;
+    await channel.sendMessage(chatJid, 'Routing to agent...');
+  }
   await channel.setTyping?.(chatJid, true);
   let hadError = false;
   let outputSentToUser = false;
@@ -634,17 +648,23 @@ async function runAgent(
       wrappedOnOutput,
     );
 
-    if (output.newSessionId) {
-      sessions[group.folder] = output.newSessionId;
-      setSession(group.folder, output.newSessionId);
-    }
-
     if (output.status === 'error') {
       logger.error(
         { group: group.name, error: output.error },
         'Container agent error',
       );
+      // Clear a broken session so the next retry starts fresh
+      if (output.error?.includes('error_during_execution') || output.error?.includes('exited with code 1')) {
+        logger.warn({ group: group.name }, 'Clearing broken session');
+        delete sessions[group.folder];
+        deleteSession(group.folder);
+      }
       return 'error';
+    }
+
+    if (output.newSessionId) {
+      sessions[group.folder] = output.newSessionId;
+      setSession(group.folder, output.newSessionId);
     }
 
     return 'success';

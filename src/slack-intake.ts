@@ -11,7 +11,7 @@ import path from 'path';
 
 import { getGithubToken } from './github-token.js';
 import { logger } from './logger.js';
-import { executeBash, runOllamaAgent } from './ollama-agent.js';
+import { clearOllamaHistory, executeBash, runOllamaAgent } from './ollama-agent.js';
 
 const INVOICING_REPO = 'myers-gh1328/Invoicing';
 const INVOICING_PATH = path.join(os.homedir(), 'code', 'Invoicing');
@@ -177,10 +177,10 @@ function extractAllDraftJsons(content: string): DraftJson[] {
 
 const INTAKE_SYSTEM_PROMPT = `You are an intake assistant for the Invoicing app. Users submit bug reports and feature requests via Slack. Your job is to gather enough information to file a high-quality GitHub issue.
 
-START: Read ${INVOICING_PATH}/docs/triage-index.md first — it has the system overview and links to all triage docs. Then read whichever of these are relevant to the report:
-- customer-language-map.md — translate vague customer phrases to technical meaning
-- triage-follow-up-questions.md — the right questions to ask per symptom class
-- known-issue-signatures.md — recognize recurring known issues
+START: Read ${INVOICING_PATH}/docs/ai-triage/triage-index.md first — it has the system overview and links to all triage docs. Then read whichever of these are relevant to the report:
+- docs/ai-triage/customer-language-map.md — translate vague customer phrases to technical meaning
+- docs/ai-triage/triage-follow-up-questions.md — the right questions to ask per symptom class
+- docs/ai-triage/known-issue-signatures.md — recognize recurring known issues
 
 After reading the relevant docs, respond with EXACTLY ONE of:
 
@@ -269,7 +269,27 @@ export async function fileGithubIssue(
   issue: PendingIssue,
   ghToken: string | null,
 ): Promise<string> {
-  const labelsArg = issue.labels.map((l) => `--label "${l}"`).join(' ');
+  // Fetch available labels from the repo and filter to only valid ones
+  let validLabels = issue.labels;
+  try {
+    const labelOutput = await executeBash(
+      `gh label list --repo ${INVOICING_REPO} --json name --jq '.[].name'`,
+      INVOICING_PATH,
+      ghToken,
+    );
+    const repoLabels = new Set(labelOutput.split('\n').map((l) => l.trim()).filter(Boolean));
+    const filtered = issue.labels.filter((l) => repoLabels.has(l));
+    if (filtered.length !== issue.labels.length) {
+      const skipped = issue.labels.filter((l) => !repoLabels.has(l));
+      logger.warn({ skipped }, 'Skipping labels not found in repo');
+    }
+    validLabels = filtered;
+  } catch (err) {
+    logger.warn({ err }, 'Could not fetch repo labels — filing without labels');
+    validLabels = [];
+  }
+
+  const labelsArg = validLabels.map((l) => `--label "${l}"`).join(' ');
   const tmpBody = path.join(os.tmpdir(), `nanoclaw-issue-${issue.id}.md`);
   fs.writeFileSync(tmpBody, issue.body, 'utf8');
   const cmd = `gh issue create --repo ${INVOICING_REPO} --title ${JSON.stringify(issue.title)} --body-file ${tmpBody} ${labelsArg}`;
@@ -335,7 +355,7 @@ export async function runBugInvestigation(
     `Repository: ${INVOICING_PATH}\n` +
     `GitHub repo: ${INVOICING_REPO}\n\n` +
     `INSTRUCTIONS:\n` +
-    `1. Start by reading ${INVOICING_PATH}/docs/triage-index.md — it contains the triage workflow, system architecture overview, and links to all other docs. Follow its recommended workflow: customer-language-map → known-issue-signatures → triage-rules.yaml → where-to-look-for-evidence. Read whichever docs are relevant before searching code.\n` +
+    `1. Start by reading ${INVOICING_PATH}/docs/ai-bug-hunting/bug-hunting-index.md — it lists all investigation docs and when to use each. Then read ${INVOICING_PATH}/docs/ai-bug-hunting/quick-start-checklist.md for the step-by-step investigation workflow. Use code-entrypoints-by-symptom.md to find the exact files and methods for the symptom, and codebase-map.md to navigate the project structure.\n` +
     `2. Search the codebase thoroughly. Use targeted grep commands (grep specific class/method names, not broad terms like 'session' across the whole repo). Use git log, git blame, and read_file. Narrow down to specific files before reading them in full.\n` +
     `3. CRITICAL — once you have found the relevant code:\n` +
     `   - Do NOT stop and say you could not find it. If you found the file and line, you found it.\n` +
@@ -351,9 +371,12 @@ export async function runBugInvestigation(
     `   g. End your final message with: RESULT:FIXED:<pr-url>\n` +
     `5. ONLY IF you have searched extensively and truly cannot locate any relevant code:\n` +
     `   a. gh issue comment ${issueNumber} --repo ${INVOICING_REPO} --body "Investigation findings: <what you searched and found>"\n` +
-    `   b. gh issue edit ${issueNumber} --repo ${INVOICING_REPO} --add-assignee copilot\n` +
+    `   b. gh issue edit ${issueNumber} --repo ${INVOICING_REPO} --add-assignee @copilot\n` +
     `   c. End your final message with: RESULT:ASSIGNED:<one line summary>\n\n` +
     `You have up to 30 minutes and 500 iterations. Be persistent. Finding the code is the hard part — once you see it, fix it.`;
+
+  // Clear stale history so previous failed runs don't contaminate this one
+  clearOllamaHistory(groupFolder);
 
   logger.info(
     { issueNumber, title: issue.title, groupFolder },
@@ -364,33 +387,21 @@ export async function runBugInvestigation(
     maxDurationMs: 30 * 60 * 1000,
     maxIterations: 500,
     maxToolOutputLength: 15000,
+    nudgeMessage:
+      'You stopped before completing the task. You must keep searching. ' +
+      'Do NOT stop until you have either fixed the bug (RESULT:FIXED) or ' +
+      'exhausted all search options and assigned the issue to Copilot (RESULT:ASSIGNED). ' +
+      'Continue now — use tools to keep searching.',
   });
 
   const fixedMatch = /RESULT:FIXED:(https?:\/\/\S+)/i.exec(reply);
   if (fixedMatch) {
-    const prUrl = fixedMatch[1];
-    const prNumber = prUrl.match(/\/pull\/(\d+)/)?.[1];
-    if (prNumber) {
-      await executeBash(
-        `gh pr comment ${prNumber} --repo ${INVOICING_REPO} --body "@copilot please review this fix"`,
-        INVOICING_PATH,
-        ghToken,
-      ).catch((err) =>
-        logger.warn({ prNumber, err }, 'Failed to request Copilot review'),
-      );
-    }
-    return { type: 'fixed', prUrl };
+    return { type: 'fixed', prUrl: fixedMatch[1] };
   }
 
-  // Model didn't fix it — guarantee the GitHub assignment actually happens
-  // regardless of whether the model ran the commands itself
+  // Agent finished without a result — ensure the GitHub actions happen
   const assignedMatch = /RESULT:ASSIGNED:(.+)/i.exec(reply);
   const summary = assignedMatch ? assignedMatch[1].trim() : reply.slice(0, 300);
-
-  logger.info(
-    { issueNumber },
-    'Investigation did not fix — ensuring Copilot assignment',
-  );
   const findingsBody = `Investigation findings:\n\n${summary}`;
   await executeBash(
     `gh issue comment ${issueNumber} --repo ${INVOICING_REPO} --body ${JSON.stringify(findingsBody)}`,
@@ -399,14 +410,12 @@ export async function runBugInvestigation(
   ).catch((err) =>
     logger.warn({ issueNumber, err }, 'Failed to post investigation comment'),
   );
-
   await executeBash(
-    `gh issue edit ${issueNumber} --repo ${INVOICING_REPO} --add-assignee copilot`,
+    `gh issue edit ${issueNumber} --repo ${INVOICING_REPO} --add-assignee @copilot`,
     INVOICING_PATH,
     ghToken,
   ).catch((err) =>
     logger.warn({ issueNumber, err }, 'Failed to assign issue to Copilot'),
   );
-
   return { type: 'assigned', summary };
 }

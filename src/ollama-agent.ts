@@ -294,6 +294,7 @@ export async function runOllamaAgent(
     maxToolOutputLength?: number;
     systemPrompt?: string;
     extraTools?: object[];
+    nudgeMessage?: string;
     toolHandler?: (
       name: string,
       args: Record<string, unknown>,
@@ -333,6 +334,7 @@ export async function runOllamaAgent(
         ],
         tools: options?.extraTools ? [...TOOLS, ...options.extraTools] : TOOLS,
         stream: false,
+        options: { num_ctx: 32768 },
       }),
     });
 
@@ -374,6 +376,14 @@ export async function runOllamaAgent(
     if (!msg.tool_calls || msg.tool_calls.length === 0) {
       const reply = msg.content.trim();
       history.push({ role: 'assistant', content: reply });
+      if (options?.nudgeMessage) {
+        logger.info(
+          { groupFolder, iteration: i },
+          'Ollama agent: model stopped — nudging to continue',
+        );
+        history.push({ role: 'user', content: options.nudgeMessage });
+        continue;
+      }
       saveHistory(groupFolder, history);
       logger.info(
         { groupFolder, replyLength: reply.length },
