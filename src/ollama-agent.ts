@@ -385,7 +385,8 @@ User message: "${text}"`;
     const raw = (data.response ?? '').trim();
     if (!raw || raw === 'null') return null;
     return JSON.parse(raw) as T;
-  } catch {
+  } catch (err) {
+    logger.warn({ err }, 'parseIntent failed');
     return null;
   }
 }
@@ -410,6 +411,10 @@ export async function runOllamaAgent(
   },
 ): Promise<string> {
   if (!histories.has(groupFolder)) {
+    // Evict oldest entry if cache is full
+    if (histories.size >= 100) {
+      histories.delete(histories.keys().next().value!);
+    }
     histories.set(groupFolder, loadHistory(groupFolder));
   }
   const history = histories.get(groupFolder)!;

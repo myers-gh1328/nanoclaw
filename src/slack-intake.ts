@@ -309,17 +309,15 @@ export async function fileGithubIssue(
     validLabels = [];
   }
 
-  const labelsArg = validLabels.map((l) => `--label "${l}"`).join(' ');
+  const labelsArg = validLabels.map((l) => `--label ${JSON.stringify(l)}`).join(' ');
   const tmpBody = path.join(os.tmpdir(), `nanoclaw-issue-${issue.id}.md`);
   fs.writeFileSync(tmpBody, issue.body, 'utf8');
   const cmd = `gh issue create --repo ${INVOICING_REPO} --title ${JSON.stringify(issue.title)} --body-file ${tmpBody} ${labelsArg}`;
   try {
     const result = await executeBash(cmd, INVOICING_PATH, ghToken);
-    fs.unlinkSync(tmpBody);
     return result;
-  } catch (err) {
-    fs.unlinkSync(tmpBody);
-    throw err;
+  } finally {
+    try { fs.unlinkSync(tmpBody); } catch { /* already gone */ }
   }
 }
 
@@ -338,10 +336,6 @@ export async function applyModificationAndFile(
     `Labels: ${issue.labels.join(', ')}\n` +
     `Body:\n${issue.body}\n\n` +
     `Use gh issue create --repo ${INVOICING_REPO} with the modified title and body. Report the URL when done.`;
-  if (ghToken) {
-    process.env.GH_TOKEN = ghToken;
-    process.env.GITHUB_TOKEN = ghToken;
-  }
   return runOllamaAgent(prompt, groupFolder);
 }
 
@@ -356,12 +350,6 @@ export async function runBugInvestigation(
 ): Promise<
   { type: 'fixed'; prUrl: string } | { type: 'assigned'; summary: string }
 > {
-  const ghToken = await getGithubToken();
-  if (ghToken) {
-    process.env.GH_TOKEN = ghToken;
-    process.env.GITHUB_TOKEN = ghToken;
-  }
-
   // Ensure isolated history folder exists for this investigation
   fs.mkdirSync(path.join(process.cwd(), 'groups', groupFolder), {
     recursive: true,

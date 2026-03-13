@@ -52,7 +52,9 @@ export function saveQueue(queue: QueuedInvestigation[]): void {
   fs.writeFileSync(queuePath(), JSON.stringify(queue, null, 2));
 }
 
-/** On startup, reset any items stuck in 'running' back to 'pending'. */
+const STUCK_TIMEOUT_MS = 2 * 60 * 60 * 1000; // 2 hours
+
+/** On startup (or mid-run), reset any items stuck in 'running' back to 'pending'. */
 export function resetRunningItems(): void {
   const queue = loadQueue();
   const stuck = queue.filter((i) => i.status === 'running');
@@ -65,6 +67,25 @@ export function resetRunningItems(): void {
   logger.info(
     { count: stuck.length },
     'Investigation queue: reset stuck running items',
+  );
+}
+
+/** Reset 'running' items that have been stuck longer than STUCK_TIMEOUT_MS. */
+function resetTimedOutItems(): void {
+  const queue = loadQueue();
+  const cutoff = new Date(Date.now() - STUCK_TIMEOUT_MS).toISOString();
+  const stuck = queue.filter(
+    (i) => i.status === 'running' && (i.startedAt ?? '') < cutoff,
+  );
+  if (stuck.length === 0) return;
+  for (const item of stuck) {
+    item.status = 'pending';
+    item.startedAt = undefined;
+  }
+  saveQueue(queue);
+  logger.warn(
+    { count: stuck.length },
+    'Investigation queue: reset timed-out running items',
   );
 }
 
@@ -97,7 +118,7 @@ export function formatQueueStatus(): string {
   const running = queue.find((i) => i.status === 'running');
   if (running) {
     const mins = running.startedAt
-      ? Math.round((Date.now() - Date.parse(running.startedAt)) / 60_000)
+      ? Math.round((Date.now() - new Date(running.startedAt).getTime()) / 60_000)
       : 0;
     lines.push(
       `▶ Running: #${running.issueNumber} "${running.issueTitle}" (started ${mins}m ago)`,
@@ -143,6 +164,8 @@ export function startWorkerLoop(
   const tick = async () => {
     if (currentlyRunning) return;
 
+    resetTimedOutItems();
+
     const queue = loadQueue();
     if (queue.some((i) => i.status === 'running')) return;
 
@@ -160,7 +183,9 @@ export function startWorkerLoop(
       { issueNumber: next.issueNumber, title: next.issueTitle },
       'Investigation queue: starting',
     );
-    await onStart?.(next).catch(() => {});
+    await onStart?.(next).catch((err) =>
+      logger.warn({ err, issueNumber: next.issueNumber }, 'Failed to send investigation start notification'),
+    );
 
     try {
       const result = await runBugInvestigation(
@@ -195,8 +220,8 @@ export function startWorkerLoop(
         { issueNumber: next.issueNumber, err },
         'Investigation queue: failed',
       );
-      await onComplete(next, { type: 'assigned', summary: errMsg }).catch(
-        () => {},
+      await onComplete(next, { type: 'assigned', summary: errMsg }).catch((err) =>
+        logger.warn({ err, issueNumber: next.issueNumber }, 'Failed to send investigation complete notification'),
       );
     } finally {
       currentlyRunning = false;
