@@ -127,7 +127,8 @@ const TOOLS = [
     type: 'function',
     function: {
       name: 'microsoft_docs_search',
-      description: 'Search Microsoft Learn / official Microsoft documentation. Use for .NET, ASP.NET, C#, Azure, and any other Microsoft technology questions.',
+      description:
+        'Search Microsoft Learn / official Microsoft documentation. Use for .NET, ASP.NET, C#, Azure, and any other Microsoft technology questions.',
       parameters: {
         type: 'object',
         properties: {
@@ -141,11 +142,15 @@ const TOOLS = [
     type: 'function',
     function: {
       name: 'microsoft_docs_fetch',
-      description: 'Fetch a specific Microsoft Learn documentation page as markdown.',
+      description:
+        'Fetch a specific Microsoft Learn documentation page as markdown.',
       parameters: {
         type: 'object',
         properties: {
-          url: { type: 'string', description: 'The Microsoft Learn page URL to fetch' },
+          url: {
+            type: 'string',
+            description: 'The Microsoft Learn page URL to fetch',
+          },
         },
         required: ['url'],
       },
@@ -610,10 +615,16 @@ export async function runOllamaAgent(
             result = `Brave search failed: ${err instanceof Error ? err.message : String(err)}`;
           }
         }
-      } else if (name === 'microsoft_docs_search' || name === 'microsoft_docs_fetch') {
+      } else if (
+        name === 'microsoft_docs_search' ||
+        name === 'microsoft_docs_fetch'
+      ) {
         const MCP_URL = 'https://learn.microsoft.com/api/mcp';
         try {
-          const toolName = name === 'microsoft_docs_search' ? 'microsoft_docs_search' : 'microsoft_docs_fetch';
+          const toolName =
+            name === 'microsoft_docs_search'
+              ? 'microsoft_docs_search'
+              : 'microsoft_docs_fetch';
           const res = await fetch(MCP_URL, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -627,11 +638,16 @@ export async function runOllamaAgent(
           if (!res.ok) {
             result = `Microsoft Learn MCP error (${res.status}): ${await res.text()}`;
           } else {
-            const data = (await res.json()) as { result?: { content?: Array<{ text?: string }> }; error?: { message: string } };
+            const data = (await res.json()) as {
+              result?: { content?: Array<{ text?: string }> };
+              error?: { message: string };
+            };
             if (data.error) {
               result = `Microsoft Learn error: ${data.error.message}`;
             } else {
-              result = data.result?.content?.map((c) => c.text ?? '').join('\n') ?? 'No results.';
+              result =
+                data.result?.content?.map((c) => c.text ?? '').join('\n') ??
+                'No results.';
             }
           }
         } catch (err) {
@@ -643,7 +659,9 @@ export async function runOllamaAgent(
           saveHistory(groupFolder, history);
           return handled.result;
         }
-        result = handled?.result ?? `Error: unknown tool "${name}". There is no "${name}" tool. Use the "bash" tool instead and run the command via shell (e.g. use bash with command "gh pr create ..." instead of calling a gh tool directly).`;
+        result =
+          handled?.result ??
+          `Error: unknown tool "${name}". There is no "${name}" tool. Use the "bash" tool instead and run the command via shell (e.g. use bash with command "gh pr create ..." instead of calling a gh tool directly).`;
       } else {
         result = `Error: unknown tool "${name}". There is no "${name}" tool. Use the "bash" tool instead and run the command via shell (e.g. use bash with command "gh pr create ..." instead of calling a gh tool directly).`;
       }

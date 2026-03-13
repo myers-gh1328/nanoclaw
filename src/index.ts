@@ -361,19 +361,20 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
 
       const pending = loadPendingIssues(SLACK_INTAKE_GROUP_FOLDER);
       const pendingRefs = pending.map((i) => i.id);
-      const parsed = pendingRefs.length > 0
-        ? await parseIntent<{ decision: string; ref: string }>(
-            `{ "decision": "yes" | "no" | "yes but <modification>", "ref": "<6-char hex id>" }`,
-            `The user is approving or rejecting a pending issue draft.\n` +
-            `Valid ref IDs: ${pendingRefs.join(', ')}.\n` +
-            `"decision" must be exactly "yes", "no", or "yes but <what to change>".\n` +
-            `If the user says yes/approve/ok/sure/looks good (or misspellings), that is "yes".\n` +
-            `If the user says no/reject/cancel/skip/drop (or misspellings), that is "no".\n` +
-            `If there is only one valid ref (${pendingRefs.length === 1 ? pendingRefs[0] : 'N/A'}) and no ref is mentioned, use that one.\n` +
-            `If no approval intent is found, return null.`,
-            text,
-          )
-        : null;
+      const parsed =
+        pendingRefs.length > 0
+          ? await parseIntent<{ decision: string; ref: string }>(
+              `{ "decision": "yes" | "no" | "yes but <modification>", "ref": "<6-char hex id>" }`,
+              `The user is approving or rejecting a pending issue draft.\n` +
+                `Valid ref IDs: ${pendingRefs.join(', ')}.\n` +
+                `"decision" must be exactly "yes", "no", or "yes but <what to change>".\n` +
+                `If the user says yes/approve/ok/sure/looks good (or misspellings), that is "yes".\n` +
+                `If the user says no/reject/cancel/skip/drop (or misspellings), that is "no".\n` +
+                `If there is only one valid ref (${pendingRefs.length === 1 ? pendingRefs[0] : 'N/A'}) and no ref is mentioned, use that one.\n` +
+                `If no approval intent is found, return null.`,
+              text,
+            )
+          : null;
       if (parsed?.decision && parsed?.ref) {
         decision = parsed.decision;
         ref = parsed.ref;
