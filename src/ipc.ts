@@ -161,6 +161,7 @@ export async function processTaskIpc(
     schedule_type?: string;
     schedule_value?: string;
     context_mode?: string;
+    agent_type?: string;
     groupFolder?: string;
     chatJid?: string;
     targetJid?: string;
@@ -254,6 +255,8 @@ export async function processTaskIpc(
           data.context_mode === 'group' || data.context_mode === 'isolated'
             ? data.context_mode
             : 'isolated';
+        const agentType =
+          data.agent_type === 'ollama' ? 'ollama' : 'claude';
         createTask({
           id: taskId,
           group_folder: targetFolder,
@@ -262,12 +265,13 @@ export async function processTaskIpc(
           schedule_type: scheduleType,
           schedule_value: data.schedule_value,
           context_mode: contextMode,
+          agent_type: agentType,
           next_run: nextRun,
           status: 'active',
           created_at: new Date().toISOString(),
         });
         logger.info(
-          { taskId, sourceGroup, targetFolder, contextMode },
+          { taskId, sourceGroup, targetFolder, contextMode, agentType },
           'Task created via IPC',
         );
       }

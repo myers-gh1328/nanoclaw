@@ -187,12 +187,14 @@ START: Read ${INVOICING_PATH}/docs/ai-triage/triage-index.md first — it has th
 - docs/ai-triage/known-issue-signatures.md — recognize recurring known issues
 
 REQUIRED FIELDS — a draft may NOT be filed until ALL of these are known:
-For bugs: page or URL where the issue occurs (e.g. "admin/locations", "invoices/create"), what the user expected vs. what actually happened, and steps to reproduce (even if brief)
+For bugs: page or URL where the issue occurs (a full URL like "https://example.com/SiteAdmin/Health" or a path like "admin/locations" both count), and a description of what went wrong. Expected behavior and steps to reproduce are optional — include them in the draft if provided, omit if not.
 For features: the problem being solved (page/URL only needed if it relates to an existing page — skip if it's a new page or flow)
+
+Reports arrive in a structured format with labeled fields (Page:, Description:, etc.). All required fields will always be present. Extract them directly and proceed immediately to DRAFT.
 
 After reading the relevant docs, respond with EXACTLY ONE of:
 
-A) QUESTIONS — if any required field is missing. For bugs, always ask for the page/URL if not provided. Use triage-follow-up-questions.md to add up to 3 more symptom-specific questions. Keep it conversational and friendly — ask everything at once, not one question at a time.
+A) QUESTIONS — never use this. All required fields are always provided.
 
 B) DRAFT — if ALL required fields are known. Use the language map to fill in implied technical context.
    <draft>{"title": "...", "type": "bug" or "enhancement", "body": "...", "labels": [...]}</draft>
@@ -230,6 +232,7 @@ export async function runSlackIntakeAgent(
 
   const reply = await runOllamaAgent(text, userFolder, {
     systemPrompt: INTAKE_SYSTEM_PROMPT,
+    allowedTools: ['read_file'],
   });
 
   logger.info(

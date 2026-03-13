@@ -77,6 +77,7 @@ import { logger } from './logger.js';
 
 const TELEGRAM_MAIN_JID = 'tg:8388828787';
 const TELEGRAM_OLLAMA_JID = 'tgo:8388828787';
+const TELEGRAM_BUG_INTAKE_JID = 'tgo:-5191721027';
 const SLACK_INTAKE_JID = 'slack:C0AL0D2K79R';
 const SLACK_INTAKE_GROUP_FOLDER = 'slack_bug_reports';
 
@@ -391,13 +392,24 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
         const action = decisionMatch[1].toLowerCase();
         const issueNum = decisionMatch[2];
         if (action === 'claude') {
-          await channel.sendMessage(chatJid, `Queuing #${issueNum} for Claude agent...`);
-          triggerManualInvestigation(issueNum, channel, chatJid).catch((err) => {
-            logger.error({ issueNum, err }, 'Claude investigation error');
-            channel.sendMessage(chatJid, `Investigation error: ${err instanceof Error ? err.message : String(err)}`);
-          });
+          await channel.sendMessage(
+            chatJid,
+            `Queuing #${issueNum} for Claude agent...`,
+          );
+          triggerManualInvestigation(issueNum, channel, chatJid).catch(
+            (err) => {
+              logger.error({ issueNum, err }, 'Claude investigation error');
+              channel.sendMessage(
+                chatJid,
+                `Investigation error: ${err instanceof Error ? err.message : String(err)}`,
+              );
+            },
+          );
         } else {
-          await channel.sendMessage(chatJid, `Ok, #${issueNum} is on you. I'll leave it open.`);
+          await channel.sendMessage(
+            chatJid,
+            `Ok, #${issueNum} is on you. I'll leave it open.`,
+          );
         }
         return true;
       }
@@ -430,7 +442,9 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
         for (const msg of userMessages) {
           const reporterName = msg.sender_name ?? 'unknown';
           const userId = msg.sender;
-          const hasImage = msg.content.includes('(Note: the user also attached an image which could not be processed.)');
+          const hasImage = msg.content.includes(
+            '(Note: the user also attached an image which could not be processed.)',
+          );
           if (hasImage) {
             const telegramChannel = findChannel(channels, TELEGRAM_OLLAMA_JID);
             telegramChannel?.sendMessage(
@@ -526,6 +540,38 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
           },
         });
         if (reply) await channel.sendMessage(chatJid, reply);
+      } else if (chatJid === TELEGRAM_BUG_INTAKE_JID) {
+        const ollamaChannel = findChannel(channels, TELEGRAM_OLLAMA_JID);
+        const senderName = missedMessages.filter(m => !m.is_from_me).pop()?.sender_name ?? 'App User';
+        const userId = `app:${senderName.replace(/\W+/g, '_').toLowerCase()}`;
+        await channel.sendMessage(chatJid, 'Bug report received. Processing...');
+        try {
+          const result = await runSlackIntakeAgent(
+            text,
+            SLACK_INTAKE_GROUP_FOLDER,
+            senderName,
+            TELEGRAM_OLLAMA_JID,
+            userId,
+          );
+          if (result.type === 'drafted' && ollamaChannel) {
+            await channel.sendMessage(chatJid, `Draft ready — sent for review.`);
+            for (const issue of result.issues) {
+              await ollamaChannel.sendMessage(
+                TELEGRAM_OLLAMA_JID,
+                formatTelegramNotification(issue),
+              );
+            }
+          } else if (result.type === 'clarification') {
+            await channel.sendMessage(chatJid, `Could not draft issue: ${result.message}`);
+          }
+        } catch (err) {
+          logger.error({ err }, 'Telegram bug report intake error');
+          await channel.sendMessage(chatJid, `Bug report intake error: ${err instanceof Error ? err.message : String(err)}`);
+          ollamaChannel?.sendMessage(
+            TELEGRAM_OLLAMA_JID,
+            `Bug report intake error: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
       } else {
         const reply = await runOllamaAgent(text, group.folder);
         if (reply) await channel.sendMessage(chatJid, reply);
@@ -635,6 +681,7 @@ async function runAgent(
       prompt: t.prompt,
       schedule_type: t.schedule_type,
       schedule_value: t.schedule_value,
+      agent_type: t.agent_type,
       status: t.status,
       next_run: t.next_run,
     })),
@@ -953,7 +1000,9 @@ async function main(): Promise<void> {
         msg = `✅ #${item.issueNumber} fixed — PR: ${result.prUrl}`;
       } else {
         const summary =
-          result?.type === 'assigned' ? result.summary : 'No details available.';
+          result?.type === 'assigned'
+            ? result.summary
+            : 'No details available.';
         msg =
           `🔍 #${item.issueNumber}: ${item.issueTitle}\n\n` +
           `Couldn't fix automatically.\n\n${summary}\n\n` +

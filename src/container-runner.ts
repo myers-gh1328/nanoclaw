@@ -29,6 +29,7 @@ import {
 import { detectAuthMode } from './credential-proxy.js';
 import { validateAdditionalMounts } from './mount-security.js';
 import { getGithubToken } from './github-token.js';
+import { readEnvFile } from './env.js';
 import { RegisteredGroup } from './types.js';
 
 // Sentinel markers for robust output parsing (must match agent-runner)
@@ -218,6 +219,7 @@ function buildContainerArgs(
   containerName: string,
   isMain: boolean,
   ghToken?: string,
+  braveApiKey?: string,
 ): string[] {
   const args: string[] = ['run', '-i', '--rm', '--name', containerName];
 
@@ -245,6 +247,11 @@ function buildContainerArgs(
   if (ghToken) {
     args.push('-e', `GH_TOKEN=${ghToken}`);
     args.push('-e', `GITHUB_TOKEN=${ghToken}`);
+  }
+
+  // Inject Brave Search API key if configured
+  if (braveApiKey) {
+    args.push('-e', `BRAVE_API_KEY=${braveApiKey}`);
   }
 
   // Runtime-specific args for host gateway resolution
@@ -288,11 +295,13 @@ export async function runContainerAgent(
   const safeName = group.folder.replace(/[^a-zA-Z0-9-]/g, '-');
   const containerName = `nanoclaw-${safeName}-${Date.now()}`;
   const ghToken = await getGithubToken();
+  const braveApiKey = readEnvFile(['BRAVE_API_KEY']).BRAVE_API_KEY;
   const containerArgs = buildContainerArgs(
     mounts,
     containerName,
     input.isMain,
     ghToken ?? undefined,
+    braveApiKey,
   );
 
   logger.debug(

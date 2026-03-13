@@ -408,7 +408,8 @@ async function runQuery(
         'TodoWrite', 'ToolSearch', 'Skill',
         'NotebookEdit',
         'mcp__nanoclaw__*',
-        'mcp__ollama__*'
+        'mcp__ollama__*',
+        'mcp__brave__*',
       ],
       env: sdkEnv,
       permissionMode: 'bypassPermissions',
@@ -428,6 +429,13 @@ async function runQuery(
           command: 'node',
           args: [path.join(path.dirname(mcpServerPath), 'ollama-mcp-stdio.js')],
         },
+        ...(process.env.BRAVE_API_KEY ? {
+          brave: {
+            command: 'node',
+            args: [path.join(path.dirname(mcpServerPath), 'brave-mcp-stdio.js')],
+            env: { BRAVE_API_KEY: process.env.BRAVE_API_KEY },
+          },
+        } : {}),
       },
       hooks: {
         PreCompact: [{ hooks: [createPreCompactHook(containerInput.assistantName)] }],

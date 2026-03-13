@@ -13,11 +13,13 @@ import { readEnvFile } from './env.js';
 import { getGithubToken } from './github-token.js';
 import { logger } from './logger.js';
 
-const envConfig = readEnvFile(['OLLAMA_HOST', 'OLLAMA_MODEL']);
+const envConfig = readEnvFile(['OLLAMA_HOST', 'OLLAMA_MODEL', 'BRAVE_API_KEY']);
 const OLLAMA_HOST =
   process.env.OLLAMA_HOST || envConfig.OLLAMA_HOST || 'http://localhost:11434';
 const OLLAMA_MODEL =
   process.env.OLLAMA_MODEL || envConfig.OLLAMA_MODEL || 'llama3.1:8b';
+const BRAVE_API_KEY =
+  process.env.BRAVE_API_KEY || envConfig.BRAVE_API_KEY;
 const MAX_HISTORY = 100;
 const MAX_TOOL_ITERATIONS = 20;
 
@@ -35,6 +37,28 @@ interface Message {
 }
 
 const TOOLS = [
+  {
+    type: 'function',
+    function: {
+      name: 'brave_search',
+      description:
+        'Search the web using Brave Search API. Returns titles, URLs, and descriptions for the top results.',
+      parameters: {
+        type: 'object',
+        properties: {
+          query: {
+            type: 'string',
+            description: 'The search query',
+          },
+          count: {
+            type: 'number',
+            description: 'Number of results to return (default: 5, max: 20)',
+          },
+        },
+        required: ['query'],
+      },
+    },
+  },
   {
     type: 'function',
     function: {
@@ -143,10 +167,9 @@ export function loadHistory(groupFolder: string): Message[] {
 
 export function saveHistory(groupFolder: string, history: Message[]): void {
   try {
-    fs.writeFileSync(
-      historyPath(groupFolder),
-      JSON.stringify(history, null, 2),
-    );
+    const p = historyPath(groupFolder);
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    fs.writeFileSync(p, JSON.stringify(history, null, 2));
   } catch (err) {
     logger.warn({ groupFolder, err }, 'Failed to save Ollama history');
   }
@@ -294,6 +317,7 @@ export async function runOllamaAgent(
     maxToolOutputLength?: number;
     systemPrompt?: string;
     extraTools?: object[];
+    allowedTools?: string[];
     nudgeMessage?: string;
     toolHandler?: (
       name: string,
@@ -332,7 +356,13 @@ export async function runOllamaAgent(
           { role: 'system', content: options?.systemPrompt ?? SYSTEM_PROMPT },
           ...history,
         ],
-        tools: options?.extraTools ? [...TOOLS, ...options.extraTools] : TOOLS,
+        tools: (() => {
+          const all = options?.extraTools ? [...TOOLS, ...options.extraTools] : TOOLS;
+          if (options?.allowedTools) {
+            return all.filter(t => options.allowedTools!.includes((t as any).function.name));
+          }
+          return all;
+        })(),
         stream: false,
         options: { num_ctx: 16384 },
       }),
@@ -452,6 +482,40 @@ export async function runOllamaAgent(
           result = fs.readFileSync(resolved, 'utf8');
         } catch (err) {
           result = `Error reading file: ${err instanceof Error ? err.message : String(err)}`;
+        }
+      } else if (name === 'brave_search') {
+        if (!BRAVE_API_KEY) {
+          result = 'Error: BRAVE_API_KEY is not configured.';
+        } else {
+          const query = parsed['query'] as string;
+          const count = (parsed['count'] as number | undefined) ?? 5;
+          try {
+            const url = `https://api.search.brave.com/res/v1/web/search?q=${encodeURIComponent(query)}&count=${Math.min(count, 20)}`;
+            const res = await fetch(url, {
+              headers: {
+                'Accept': 'application/json',
+                'Accept-Encoding': 'gzip',
+                'X-Subscription-Token': BRAVE_API_KEY,
+              },
+            });
+            if (!res.ok) {
+              result = `Brave API error (${res.status}): ${await res.text()}`;
+            } else {
+              const data = await res.json() as {
+                web?: { results?: Array<{ title: string; url: string; description?: string }> };
+              };
+              const results = data.web?.results ?? [];
+              if (results.length === 0) {
+                result = 'No results found.';
+              } else {
+                result = results.map((r, i) =>
+                  `${i + 1}. ${r.title}\n   ${r.url}${r.description ? `\n   ${r.description}` : ''}`
+                ).join('\n\n');
+              }
+            }
+          } catch (err) {
+            result = `Brave search failed: ${err instanceof Error ? err.message : String(err)}`;
+          }
         }
       } else if (options?.toolHandler) {
         const handled = await options.toolHandler(name, parsed);

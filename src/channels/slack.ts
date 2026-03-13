@@ -119,7 +119,8 @@ export class SlackChannel implements Channel {
       // (e.g., ^@<ASSISTANT_NAME>\b), so we prepend the trigger when the bot is @mentioned.
       let content = msg.text;
       if (hasFiles && !isBotMessage) {
-        content += '\n\n(Note: the user also attached an image which could not be processed.)';
+        content +=
+          '\n\n(Note: the user also attached an image which could not be processed.)';
       }
       if (this.botUserId && !isBotMessage) {
         const mentionPattern = `<@${this.botUserId}>`;

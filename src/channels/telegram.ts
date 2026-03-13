@@ -77,7 +77,9 @@ export class TelegramChannel implements Channel {
       ctx.reply(`${ASSISTANT_NAME} is online.`);
     });
 
-    this.bot.on('message:text', async (ctx) => {
+    this.bot.on('message', async (ctx) => {
+      // Skip non-text messages (handled separately below)
+      if (!ctx.message.text) return;
       // Skip commands
       if (ctx.message.text.startsWith('/')) return;
 
