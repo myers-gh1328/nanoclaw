@@ -20,7 +20,9 @@ const envConfig = readEnvFile(['OLLAMA_HOST', 'OLLAMA_MODEL']);
 const OLLAMA_IMAGE =
   process.env.OLLAMA_CONTAINER_IMAGE || 'nanoclaw-ollama:latest';
 const OLLAMA_HOST =
-  process.env.OLLAMA_HOST || envConfig.OLLAMA_HOST || 'http://host.docker.internal:11434';
+  process.env.OLLAMA_HOST ||
+  envConfig.OLLAMA_HOST ||
+  'http://host.docker.internal:11434';
 const OLLAMA_MODEL =
   process.env.OLLAMA_MODEL || envConfig.OLLAMA_MODEL || 'llama3.1:8b';
 
@@ -36,7 +38,10 @@ export interface OllamaContainerOptions {
   /** Extra tool definitions (no bash/file access). When called, customToolHandler is invoked. */
   customTools?: object[];
   /** Called when the model invokes a custom tool. Return the reply to send to the user. */
-  customToolHandler?: (name: string, args: Record<string, unknown>) => Promise<string | null>;
+  customToolHandler?: (
+    name: string,
+    args: Record<string, unknown>,
+  ) => Promise<string | null>;
 }
 
 export async function runOllamaContainer(
@@ -49,7 +54,8 @@ export async function runOllamaContainer(
   // Split groupFolder into base (for mount) and historySubdir
   // e.g. "slack_engineering/history/userId" → base="slack_engineering", subdir="history/userId"
   const slashIdx = groupFolder.indexOf('/');
-  const baseFolder = slashIdx === -1 ? groupFolder : groupFolder.slice(0, slashIdx);
+  const baseFolder =
+    slashIdx === -1 ? groupFolder : groupFolder.slice(0, slashIdx);
   const historySubdir = slashIdx === -1 ? '' : groupFolder.slice(slashIdx + 1);
 
   const groupDir = path.join(GROUPS_DIR, baseFolder);
@@ -62,15 +68,24 @@ export async function runOllamaContainer(
   const containerName = `nanoclaw-ollama-${baseFolder}-${Date.now()}`;
 
   const args = [
-    'run', '-i', '--rm',
-    '--name', containerName,
-    '-e', `TZ=${process.env.TZ || 'UTC'}`,
-    '-e', `OLLAMA_HOST=${OLLAMA_HOST}`,
-    '-e', `OLLAMA_MODEL=${OLLAMA_MODEL}`,
+    'run',
+    '-i',
+    '--rm',
+    '--name',
+    containerName,
+    '-e',
+    `TZ=${process.env.TZ || 'UTC'}`,
+    '-e',
+    `OLLAMA_HOST=${OLLAMA_HOST}`,
+    '-e',
+    `OLLAMA_MODEL=${OLLAMA_MODEL}`,
     ...hostGatewayArgs(),
-    '--user', `${hostUid}:${hostGid}`,
-    '-e', 'HOME=/home/node',
-    '-v', `${groupDir}:/workspace/group`,
+    '--user',
+    `${hostUid}:${hostGid}`,
+    '-e',
+    'HOME=/home/node',
+    '-v',
+    `${groupDir}:/workspace/group`,
   ];
 
   if (ghToken) {
@@ -94,12 +109,18 @@ export async function runOllamaContainer(
   });
 
   logger.info(
-    { group: baseFolder, historySubdir: historySubdir || undefined, model: OLLAMA_MODEL },
+    {
+      group: baseFolder,
+      historySubdir: historySubdir || undefined,
+      model: OLLAMA_MODEL,
+    },
     'Spawning Ollama container',
   );
 
   return new Promise((resolve, reject) => {
-    const container = spawn(CONTAINER_RUNTIME_BIN, args, { stdio: ['pipe', 'pipe', 'pipe'] });
+    const container = spawn(CONTAINER_RUNTIME_BIN, args, {
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
 
     let stdout = '';
     let stderr = '';
@@ -113,7 +134,8 @@ export async function runOllamaContainer(
       stderr += text;
       // Log runner messages in real time
       for (const line of text.split('\n')) {
-        if (line.trim()) logger.debug({ group: baseFolder, line }, 'ollama-runner');
+        if (line.trim())
+          logger.debug({ group: baseFolder, line }, 'ollama-runner');
       }
     });
 
@@ -123,8 +145,15 @@ export async function runOllamaContainer(
 
     container.on('close', (code) => {
       if (code !== 0) {
-        logger.error({ group: baseFolder, code, stderr: stderr.slice(-500) }, 'Ollama container exited with error');
-        reject(new Error(`Ollama container exited with code ${code}: ${stderr.slice(-200)}`));
+        logger.error(
+          { group: baseFolder, code, stderr: stderr.slice(-500) },
+          'Ollama container exited with error',
+        );
+        reject(
+          new Error(
+            `Ollama container exited with code ${code}: ${stderr.slice(-200)}`,
+          ),
+        );
         return;
       }
 
@@ -133,13 +162,18 @@ export async function runOllamaContainer(
       const endIdx = stdout.lastIndexOf(OUTPUT_END_MARKER);
 
       if (startIdx === -1 || endIdx === -1 || endIdx < startIdx) {
-        logger.error({ group: baseFolder, stdout: stdout.slice(-500) }, 'No output markers in Ollama container stdout');
+        logger.error(
+          { group: baseFolder, stdout: stdout.slice(-500) },
+          'No output markers in Ollama container stdout',
+        );
         reject(new Error('Ollama container produced no output'));
         return;
       }
 
       try {
-        const jsonLine = stdout.slice(startIdx + OUTPUT_START_MARKER.length, endIdx).trim();
+        const jsonLine = stdout
+          .slice(startIdx + OUTPUT_START_MARKER.length, endIdx)
+          .trim();
         const output = JSON.parse(jsonLine) as {
           status: string;
           result: string | null;
@@ -153,18 +187,34 @@ export async function runOllamaContainer(
           return;
         }
 
-        if (output.status === 'custom_tool' && output.toolName && customToolHandler) {
-          logger.info({ group: baseFolder, tool: output.toolName }, 'Ollama container: custom tool call');
+        if (
+          output.status === 'custom_tool' &&
+          output.toolName &&
+          customToolHandler
+        ) {
+          logger.info(
+            { group: baseFolder, tool: output.toolName },
+            'Ollama container: custom tool call',
+          );
           customToolHandler(output.toolName, output.toolArgs ?? {})
-            .then((handlerResult) => resolve(handlerResult ?? output.result ?? ''))
+            .then((handlerResult) =>
+              resolve(handlerResult ?? output.result ?? ''),
+            )
             .catch((err) => reject(err));
           return;
         }
 
-        logger.info({ group: baseFolder, resultLength: output.result?.length ?? 0 }, 'Ollama container completed');
+        logger.info(
+          { group: baseFolder, resultLength: output.result?.length ?? 0 },
+          'Ollama container completed',
+        );
         resolve(output.result ?? '');
       } catch (err) {
-        reject(new Error(`Failed to parse Ollama container output: ${err instanceof Error ? err.message : String(err)}`));
+        reject(
+          new Error(
+            `Failed to parse Ollama container output: ${err instanceof Error ? err.message : String(err)}`,
+          ),
+        );
       }
     });
 

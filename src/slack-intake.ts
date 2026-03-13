@@ -11,7 +11,11 @@ import path from 'path';
 
 import { getGithubToken } from './github-token.js';
 import { logger } from './logger.js';
-import { clearOllamaHistory, executeBash, runOllamaAgent } from './ollama-agent.js';
+import {
+  clearOllamaHistory,
+  executeBash,
+  runOllamaAgent,
+} from './ollama-agent.js';
 
 const INVOICING_REPO = 'myers-gh1328/Invoicing';
 const INVOICING_PATH = path.join(os.homedir(), 'code', 'Invoicing');
@@ -182,11 +186,15 @@ START: Read ${INVOICING_PATH}/docs/ai-triage/triage-index.md first — it has th
 - docs/ai-triage/triage-follow-up-questions.md — the right questions to ask per symptom class
 - docs/ai-triage/known-issue-signatures.md — recognize recurring known issues
 
+REQUIRED FIELDS — a draft may NOT be filed until ALL of these are known:
+For bugs: page or URL where the issue occurs (e.g. "admin/locations", "invoices/create"), what the user expected vs. what actually happened, and steps to reproduce (even if brief)
+For features: the problem being solved (page/URL only needed if it relates to an existing page — skip if it's a new page or flow)
+
 After reading the relevant docs, respond with EXACTLY ONE of:
 
-A) QUESTIONS — if the report needs more information. Use triage-follow-up-questions.md to pick the 2-4 most useful questions for the symptom. Be conversational and friendly.
+A) QUESTIONS — if any required field is missing. For bugs, always ask for the page/URL if not provided. Use triage-follow-up-questions.md to add up to 3 more symptom-specific questions. Keep it conversational and friendly — ask everything at once, not one question at a time.
 
-B) DRAFT — if you have enough to file a useful issue. Use the language map to fill in implied technical context.
+B) DRAFT — if ALL required fields are known. Use the language map to fill in implied technical context.
    <draft>{"title": "...", "type": "bug" or "enhancement", "body": "...", "labels": [...]}</draft>
    Body format for bugs: ## Description, ## Steps to Reproduce, ## Expected Behavior, ## Actual Behavior, ## Likely Subsystem
    Body format for features: ## Problem, ## Proposed Solution
@@ -277,7 +285,12 @@ export async function fileGithubIssue(
       INVOICING_PATH,
       ghToken,
     );
-    const repoLabels = new Set(labelOutput.split('\n').map((l) => l.trim()).filter(Boolean));
+    const repoLabels = new Set(
+      labelOutput
+        .split('\n')
+        .map((l) => l.trim())
+        .filter(Boolean),
+    );
     const filtered = issue.labels.filter((l) => repoLabels.has(l));
     if (filtered.length !== issue.labels.length) {
       const skipped = issue.labels.filter((l) => !repoLabels.has(l));
@@ -356,7 +369,11 @@ export async function runBugInvestigation(
     `GitHub repo: ${INVOICING_REPO}\n\n` +
     `INSTRUCTIONS:\n` +
     `1. Start by reading ${INVOICING_PATH}/docs/ai-bug-hunting/bug-hunting-index.md — it lists all investigation docs and when to use each. Then read ${INVOICING_PATH}/docs/ai-bug-hunting/quick-start-checklist.md for the step-by-step investigation workflow. Use code-entrypoints-by-symptom.md to find the exact files and methods for the symptom, and codebase-map.md to navigate the project structure.\n` +
-    `2. Search the codebase thoroughly. Use targeted grep commands (grep specific class/method names, not broad terms like 'session' across the whole repo). Use git log, git blame, and read_file. Narrow down to specific files before reading them in full.\n` +
+    `2. Finding the file — use this strategy:\n` +
+    `   a. If the issue mentions a URL path (e.g. "admin/locations"), translate each segment into a filename search: run \`find ${INVOICING_PATH} -iname "*Location*" -o -iname "*Admin*"\` or similar. Razor pages, components, and views are named after the route segment.\n` +
+    `   b. Search for key terms case-INSENSITIVELY: \`grep -ri "keyword" ${INVOICING_PATH} --include="*.razor" --include="*.cs" -l\`. Never search for full button/label text verbatim — use one or two words.\n` +
+    `   c. If unsure, list the directory: \`ls ${INVOICING_PATH}/Invoicing.Web/Features/Admin/\` and look for the obvious file.\n` +
+    `   d. Do NOT give up after one failed search. Try at least 3 different search terms/strategies before concluding a file can't be found.\n` +
     `3. CRITICAL — once you have found the relevant code:\n` +
     `   - Do NOT stop and say you could not find it. If you found the file and line, you found it.\n` +
     `   - Do NOT say "I am not confident" if you can read the code and understand what it does wrong.\n` +
@@ -399,23 +416,7 @@ export async function runBugInvestigation(
     return { type: 'fixed', prUrl: fixedMatch[1] };
   }
 
-  // Agent finished without a result — ensure the GitHub actions happen
   const assignedMatch = /RESULT:ASSIGNED:(.+)/i.exec(reply);
   const summary = assignedMatch ? assignedMatch[1].trim() : reply.slice(0, 300);
-  const findingsBody = `Investigation findings:\n\n${summary}`;
-  await executeBash(
-    `gh issue comment ${issueNumber} --repo ${INVOICING_REPO} --body ${JSON.stringify(findingsBody)}`,
-    INVOICING_PATH,
-    ghToken,
-  ).catch((err) =>
-    logger.warn({ issueNumber, err }, 'Failed to post investigation comment'),
-  );
-  await executeBash(
-    `gh issue edit ${issueNumber} --repo ${INVOICING_REPO} --add-assignee @copilot`,
-    INVOICING_PATH,
-    ghToken,
-  ).catch((err) =>
-    logger.warn({ issueNumber, err }, 'Failed to assign issue to Copilot'),
-  );
   return { type: 'assigned', summary };
 }

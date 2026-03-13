@@ -77,6 +77,14 @@ export class SlackChannel implements Channel {
       // After filtering, event is either GenericMessageEvent or BotMessageEvent
       const msg = event as HandledMessageEvent;
 
+      const hasFiles = !!(event as { files?: unknown[] }).files?.length;
+      if (!msg.text && hasFiles) {
+        await this.app.client.chat.postMessage({
+          channel: msg.channel,
+          text: "Sorry, image attachments aren't supported. Please describe the issue in text.",
+        });
+        return;
+      }
       if (!msg.text) return;
 
       // Threaded replies are flattened into the channel conversation.
@@ -110,6 +118,9 @@ export class SlackChannel implements Channel {
       // Slack encodes @mentions as <@U12345>, which won't match TRIGGER_PATTERN
       // (e.g., ^@<ASSISTANT_NAME>\b), so we prepend the trigger when the bot is @mentioned.
       let content = msg.text;
+      if (hasFiles && !isBotMessage) {
+        content += '\n\n(Note: the user also attached an image which could not be processed.)';
+      }
       if (this.botUserId && !isBotMessage) {
         const mentionPattern = `<@${this.botUserId}>`;
         if (

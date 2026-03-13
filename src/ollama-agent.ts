@@ -334,7 +334,7 @@ export async function runOllamaAgent(
         ],
         tools: options?.extraTools ? [...TOOLS, ...options.extraTools] : TOOLS,
         stream: false,
-        options: { num_ctx: 32768 },
+        options: { num_ctx: 16384 },
       }),
     });
 

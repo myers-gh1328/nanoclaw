@@ -119,7 +119,10 @@ function loadState(): void {
 function saveState(): void {
   setRouterState('last_timestamp', lastTimestamp);
   setRouterState('last_agent_timestamp', JSON.stringify(lastAgentTimestamp));
-  setRouterState('acknowledged_timestamp', JSON.stringify(acknowledgedTimestamp));
+  setRouterState(
+    'acknowledged_timestamp',
+    JSON.stringify(acknowledgedTimestamp),
+  );
 }
 
 function registerGroup(jid: string, group: RegisteredGroup): void {
@@ -381,6 +384,23 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
         await channel.sendMessage(chatJid, formatQueueStatus());
         return true;
       }
+
+      // Investigation decision: "manual 227" or "claude 227"
+      const decisionMatch = /^(manual|claude)\s+(\d+)$/i.exec(text);
+      if (decisionMatch) {
+        const action = decisionMatch[1].toLowerCase();
+        const issueNum = decisionMatch[2];
+        if (action === 'claude') {
+          await channel.sendMessage(chatJid, `Queuing #${issueNum} for Claude agent...`);
+          triggerManualInvestigation(issueNum, channel, chatJid).catch((err) => {
+            logger.error({ issueNum, err }, 'Claude investigation error');
+            channel.sendMessage(chatJid, `Investigation error: ${err instanceof Error ? err.message : String(err)}`);
+          });
+        } else {
+          await channel.sendMessage(chatJid, `Ok, #${issueNum} is on you. I'll leave it open.`);
+        }
+        return true;
+      }
     }
   }
 
@@ -410,6 +430,14 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
         for (const msg of userMessages) {
           const reporterName = msg.sender_name ?? 'unknown';
           const userId = msg.sender;
+          const hasImage = msg.content.includes('(Note: the user also attached an image which could not be processed.)');
+          if (hasImage) {
+            const telegramChannel = findChannel(channels, TELEGRAM_OLLAMA_JID);
+            telegramChannel?.sendMessage(
+              TELEGRAM_OLLAMA_JID,
+              `📎 @${reporterName} attached an image in Slack that couldn't be processed.`,
+            );
+          }
           await channel.sendMessage(
             chatJid,
             `Thanks @${reporterName}, reviewing your report...`,
@@ -654,7 +682,10 @@ async function runAgent(
         'Container agent error',
       );
       // Clear a broken session so the next retry starts fresh
-      if (output.error?.includes('error_during_execution') || output.error?.includes('exited with code 1')) {
+      if (
+        output.error?.includes('error_during_execution') ||
+        output.error?.includes('exited with code 1')
+      ) {
         logger.warn({ group: group.name }, 'Clearing broken session');
         delete sessions[group.folder];
         deleteSession(group.folder);
@@ -917,10 +948,17 @@ async function main(): Promise<void> {
     async (item, result) => {
       const telegramChannel = findChannel(channels, TELEGRAM_OLLAMA_JID);
       if (!telegramChannel) return;
-      const msg =
-        result?.type === 'fixed'
-          ? `✅ #${item.issueNumber} fixed — PR: ${result.prUrl}`
-          : `🔍 #${item.issueNumber} assigned to Copilot. ${result?.type === 'assigned' ? result.summary : ''}`;
+      let msg: string;
+      if (result?.type === 'fixed') {
+        msg = `✅ #${item.issueNumber} fixed — PR: ${result.prUrl}`;
+      } else {
+        const summary =
+          result?.type === 'assigned' ? result.summary : 'No details available.';
+        msg =
+          `🔍 #${item.issueNumber}: ${item.issueTitle}\n\n` +
+          `Couldn't fix automatically.\n\n${summary}\n\n` +
+          `Reply "manual ${item.issueNumber}" to handle it yourself, or "claude ${item.issueNumber}" to pass it to the Claude agent.`;
+      }
       await telegramChannel.sendMessage(TELEGRAM_OLLAMA_JID, msg);
     },
     async (item) => {

@@ -23,8 +23,7 @@ export const CONTAINER_HOST_GATEWAY =
 /**
  * Address the credential proxy binds to.
  */
-export const PROXY_BIND_HOST =
-  process.env.CREDENTIAL_PROXY_HOST || '0.0.0.0';
+export const PROXY_BIND_HOST = process.env.CREDENTIAL_PROXY_HOST || '0.0.0.0';
 
 /** CLI args needed for the container to resolve the host gateway. */
 export function hostGatewayArgs(): string[] {
