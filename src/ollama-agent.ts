@@ -18,8 +18,7 @@ const OLLAMA_HOST =
   process.env.OLLAMA_HOST || envConfig.OLLAMA_HOST || 'http://localhost:11434';
 const OLLAMA_MODEL =
   process.env.OLLAMA_MODEL || envConfig.OLLAMA_MODEL || 'llama3.1:8b';
-const BRAVE_API_KEY =
-  process.env.BRAVE_API_KEY || envConfig.BRAVE_API_KEY;
+const BRAVE_API_KEY = process.env.BRAVE_API_KEY || envConfig.BRAVE_API_KEY;
 const MAX_HISTORY = 100;
 const MAX_TOOL_ITERATIONS = 20;
 
@@ -124,6 +123,34 @@ const TOOLS = [
       },
     },
   },
+  {
+    type: 'function',
+    function: {
+      name: 'microsoft_docs_search',
+      description: 'Search Microsoft Learn / official Microsoft documentation. Use for .NET, ASP.NET, C#, Azure, and any other Microsoft technology questions.',
+      parameters: {
+        type: 'object',
+        properties: {
+          query: { type: 'string', description: 'Search query' },
+        },
+        required: ['query'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'microsoft_docs_fetch',
+      description: 'Fetch a specific Microsoft Learn documentation page as markdown.',
+      parameters: {
+        type: 'object',
+        properties: {
+          url: { type: 'string', description: 'The Microsoft Learn page URL to fetch' },
+        },
+        required: ['url'],
+      },
+    },
+  },
 ];
 
 const SYSTEM_PROMPT = `You are a coding assistant. You have tools to read/write files and run shell commands.
@@ -134,9 +161,11 @@ CRITICAL RULES — violation is failure:
 3. NEVER describe code changes. Use write_file to make them.
 4. NEVER ask the user to run commands. Use bash to run them yourself.
 5. After completing all tool calls, write a SHORT summary of what you did.
+6. There is NO "gh" tool and NO "git" tool. Run ALL gh and git commands through the "bash" tool (e.g. bash with command "gh pr create ..." or "git push ...").
+7. When pushing a new branch for the first time, ALWAYS use "git push -u origin <branch>" (the -u flag is required).
 
 Tools:
-- bash: run any shell command (git, gh, npm, node, ls, etc.)
+- bash: run any shell command (git, gh, npm, node, ls, etc.) — this is the ONLY way to run git and gh commands
 - write_file(path, content): write a file — ALWAYS use this to write code, never use bash for file writing
 - read_file(path): read a file
 
@@ -308,6 +337,54 @@ function parseContentToolCall(
   return null;
 }
 
+const INTENT_MODEL = 'llama3.2:1b';
+
+/**
+ * Use a fast local model to parse user intent from a free-form message.
+ * Handles typos, misspellings, and informal phrasing.
+ *
+ * @param schema - JSON schema describing the fields to extract
+ * @param context - Additional context to help the model (e.g. list of valid refs)
+ * @param text - The raw user message to parse
+ * @returns Parsed object matching the schema, or null if intent is unclear
+ */
+export async function parseIntent<T>(
+  schema: string,
+  context: string,
+  text: string,
+): Promise<T | null> {
+  const prompt = `You are a strict JSON extractor. Extract structured data from the user message below.
+${context}
+
+Return ONLY valid JSON matching this schema — no explanation, no markdown:
+${schema}
+
+If you cannot confidently extract the data, return: null
+
+User message: "${text}"`;
+
+  try {
+    const res = await fetch(`${OLLAMA_HOST}/api/generate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: INTENT_MODEL,
+        prompt,
+        stream: false,
+        format: 'json',
+        options: { temperature: 0, num_predict: 200 },
+      }),
+    });
+    if (!res.ok) return null;
+    const data = (await res.json()) as { response?: string };
+    const raw = (data.response ?? '').trim();
+    if (!raw || raw === 'null') return null;
+    return JSON.parse(raw) as T;
+  } catch {
+    return null;
+  }
+}
+
 export async function runOllamaAgent(
   text: string,
   groupFolder: string,
@@ -316,6 +393,8 @@ export async function runOllamaAgent(
     maxDurationMs?: number;
     maxToolOutputLength?: number;
     systemPrompt?: string;
+    model?: string;
+    numCtx?: number;
     extraTools?: object[];
     allowedTools?: string[];
     nudgeMessage?: string;
@@ -341,7 +420,8 @@ export async function runOllamaAgent(
     history.splice(0, history.length - MAX_HISTORY);
   }
 
-  logger.info({ groupFolder, model: OLLAMA_MODEL }, 'Ollama agent: generating');
+  const model = options?.model ?? OLLAMA_MODEL;
+  logger.info({ groupFolder, model }, 'Ollama agent: generating');
 
   for (let i = 0; i < maxIterations; i++) {
     if (deadline && Date.now() > deadline) {
@@ -351,20 +431,24 @@ export async function runOllamaAgent(
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        model: OLLAMA_MODEL,
+        model,
         messages: [
           { role: 'system', content: options?.systemPrompt ?? SYSTEM_PROMPT },
           ...history,
         ],
         tools: (() => {
-          const all = options?.extraTools ? [...TOOLS, ...options.extraTools] : TOOLS;
+          const all = options?.extraTools
+            ? [...TOOLS, ...options.extraTools]
+            : TOOLS;
           if (options?.allowedTools) {
-            return all.filter(t => options.allowedTools!.includes((t as any).function.name));
+            return all.filter((t) =>
+              options.allowedTools!.includes((t as any).function.name),
+            );
           }
           return all;
         })(),
         stream: false,
-        options: { num_ctx: 16384 },
+        options: { num_ctx: options?.numCtx ?? 16384 },
       }),
     });
 
@@ -493,7 +577,7 @@ export async function runOllamaAgent(
             const url = `https://api.search.brave.com/res/v1/web/search?q=${encodeURIComponent(query)}&count=${Math.min(count, 20)}`;
             const res = await fetch(url, {
               headers: {
-                'Accept': 'application/json',
+                Accept: 'application/json',
                 'Accept-Encoding': 'gzip',
                 'X-Subscription-Token': BRAVE_API_KEY,
               },
@@ -501,21 +585,57 @@ export async function runOllamaAgent(
             if (!res.ok) {
               result = `Brave API error (${res.status}): ${await res.text()}`;
             } else {
-              const data = await res.json() as {
-                web?: { results?: Array<{ title: string; url: string; description?: string }> };
+              const data = (await res.json()) as {
+                web?: {
+                  results?: Array<{
+                    title: string;
+                    url: string;
+                    description?: string;
+                  }>;
+                };
               };
               const results = data.web?.results ?? [];
               if (results.length === 0) {
                 result = 'No results found.';
               } else {
-                result = results.map((r, i) =>
-                  `${i + 1}. ${r.title}\n   ${r.url}${r.description ? `\n   ${r.description}` : ''}`
-                ).join('\n\n');
+                result = results
+                  .map(
+                    (r, i) =>
+                      `${i + 1}. ${r.title}\n   ${r.url}${r.description ? `\n   ${r.description}` : ''}`,
+                  )
+                  .join('\n\n');
               }
             }
           } catch (err) {
             result = `Brave search failed: ${err instanceof Error ? err.message : String(err)}`;
           }
+        }
+      } else if (name === 'microsoft_docs_search' || name === 'microsoft_docs_fetch') {
+        const MCP_URL = 'https://learn.microsoft.com/api/mcp';
+        try {
+          const toolName = name === 'microsoft_docs_search' ? 'microsoft_docs_search' : 'microsoft_docs_fetch';
+          const res = await fetch(MCP_URL, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              jsonrpc: '2.0',
+              id: 1,
+              method: 'tools/call',
+              params: { name: toolName, arguments: parsed },
+            }),
+          });
+          if (!res.ok) {
+            result = `Microsoft Learn MCP error (${res.status}): ${await res.text()}`;
+          } else {
+            const data = (await res.json()) as { result?: { content?: Array<{ text?: string }> }; error?: { message: string } };
+            if (data.error) {
+              result = `Microsoft Learn error: ${data.error.message}`;
+            } else {
+              result = data.result?.content?.map((c) => c.text ?? '').join('\n') ?? 'No results.';
+            }
+          }
+        } catch (err) {
+          result = `Microsoft Learn request failed: ${err instanceof Error ? err.message : String(err)}`;
         }
       } else if (options?.toolHandler) {
         const handled = await options.toolHandler(name, parsed);
@@ -523,9 +643,9 @@ export async function runOllamaAgent(
           saveHistory(groupFolder, history);
           return handled.result;
         }
-        result = handled?.result ?? `Unknown tool: ${name}`;
+        result = handled?.result ?? `Error: unknown tool "${name}". There is no "${name}" tool. Use the "bash" tool instead and run the command via shell (e.g. use bash with command "gh pr create ..." instead of calling a gh tool directly).`;
       } else {
-        result = `Unknown tool: ${name}`;
+        result = `Error: unknown tool "${name}". There is no "${name}" tool. Use the "bash" tool instead and run the command via shell (e.g. use bash with command "gh pr create ..." instead of calling a gh tool directly).`;
       }
 
       // Truncate large tool outputs so the model isn't overwhelmed

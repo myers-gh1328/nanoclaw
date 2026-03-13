@@ -90,7 +90,9 @@ export function formatTelegramNotification(issue: PendingIssue): string {
     `Title: ${issue.title}\n` +
     `Labels: ${issue.labels.join(', ')}\n\n` +
     `${bodyPreview}\n\n` +
-    `Reply "yes", "no", or "yes but [changes]" (ref: ${issue.id})`
+    `To approve: yes (ref: ${issue.id})\n` +
+    `To reject: no (ref: ${issue.id})\n` +
+    `To modify: yes but [describe changes] (ref: ${issue.id})`
   );
 }
 
@@ -233,6 +235,8 @@ export async function runSlackIntakeAgent(
   const reply = await runOllamaAgent(text, userFolder, {
     systemPrompt: INTAKE_SYSTEM_PROMPT,
     allowedTools: ['read_file'],
+    model: 'llama3.2:1b',
+    numCtx: 8192,
   });
 
   logger.info(
@@ -384,11 +388,12 @@ export async function runBugInvestigation(
     `4. IF you attempt a fix:\n` +
     `   a. git checkout -b ${branchName}\n` +
     `   b. Apply the fix using write_file\n` +
-    `   c. git add and git commit -m "Fix: ${issue.title} (closes #${issueNumber})"\n` +
-    `   d. git push -u origin ${branchName}\n` +
-    `   e. gh pr create --repo ${INVOICING_REPO} --title "Fix: ${issue.title}" --body "Closes #${issueNumber}" --head ${branchName}\n` +
-    `   f. gh pr comment <pr-number> --repo ${INVOICING_REPO} --body "@copilot please review this fix"\n` +
-    `   g. End your final message with: RESULT:FIXED:<pr-url>\n` +
+    `   c. Run \`dotnet build ${INVOICING_PATH}\` to verify the fix compiles. If it fails, read the errors and fix them before continuing. Do NOT push broken code.\n` +
+    `   d. git add and git commit -m "Fix: ${issue.title} (closes #${issueNumber})"\n` +
+    `   e. git push -u origin ${branchName}\n` +
+    `   f. gh pr create --repo ${INVOICING_REPO} --title "Fix: ${issue.title}" --body "Closes #${issueNumber}" --head ${branchName}\n` +
+    `   g. gh pr comment <pr-number> --repo ${INVOICING_REPO} --body "@copilot please review this fix"\n` +
+    `   h. End your final message with: RESULT:FIXED:<pr-url>\n` +
     `5. ONLY IF you have searched extensively and truly cannot locate any relevant code:\n` +
     `   a. gh issue comment ${issueNumber} --repo ${INVOICING_REPO} --body "Investigation findings: <what you searched and found>"\n` +
     `   b. gh issue edit ${issueNumber} --repo ${INVOICING_REPO} --add-assignee @copilot\n` +
@@ -407,6 +412,7 @@ export async function runBugInvestigation(
     maxDurationMs: 30 * 60 * 1000,
     maxIterations: 500,
     maxToolOutputLength: 15000,
+    numCtx: 32768,
     nudgeMessage:
       'You stopped before completing the task. You must keep searching. ' +
       'Do NOT stop until you have either fixed the bug (RESULT:FIXED) or ' +

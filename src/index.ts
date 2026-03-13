@@ -54,7 +54,7 @@ import {
   shouldDropMessage,
 } from './sender-allowlist.js';
 import { startSchedulerLoop } from './task-scheduler.js';
-import { executeBash, runOllamaAgent } from './ollama-agent.js';
+import { executeBash, runOllamaAgent, parseIntent } from './ollama-agent.js';
 import {
   runSlackIntakeAgent,
   parseApprovalReply,
@@ -359,19 +359,24 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       let decision: string | null = null;
       let ref: string | null = null;
 
-      const parsed = parseApprovalReply(text);
-      if (parsed) {
+      const pending = loadPendingIssues(SLACK_INTAKE_GROUP_FOLDER);
+      const pendingRefs = pending.map((i) => i.id);
+      const parsed = pendingRefs.length > 0
+        ? await parseIntent<{ decision: string; ref: string }>(
+            `{ "decision": "yes" | "no" | "yes but <modification>", "ref": "<6-char hex id>" }`,
+            `The user is approving or rejecting a pending issue draft.\n` +
+            `Valid ref IDs: ${pendingRefs.join(', ')}.\n` +
+            `"decision" must be exactly "yes", "no", or "yes but <what to change>".\n` +
+            `If the user says yes/approve/ok/sure/looks good (or misspellings), that is "yes".\n` +
+            `If the user says no/reject/cancel/skip/drop (or misspellings), that is "no".\n` +
+            `If there is only one valid ref (${pendingRefs.length === 1 ? pendingRefs[0] : 'N/A'}) and no ref is mentioned, use that one.\n` +
+            `If no approval intent is found, return null.`,
+            text,
+          )
+        : null;
+      if (parsed?.decision && parsed?.ref) {
         decision = parsed.decision;
         ref = parsed.ref;
-      } else {
-        const bareMatch = /^(yes|no|yes but .+)$/i.exec(text);
-        if (bareMatch) {
-          const pending = loadPendingIssues(SLACK_INTAKE_GROUP_FOLDER);
-          if (pending.length === 1) {
-            decision = bareMatch[1].trim();
-            ref = pending[0].id;
-          }
-        }
       }
 
       if (decision && ref) {
@@ -494,6 +499,8 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
         }
       } else if (chatJid === TELEGRAM_OLLAMA_JID) {
         const reply = await runOllamaAgent(text, group.folder, {
+          model: 'llama3.2:1b',
+          numCtx: 4096,
           systemPrompt:
             `You are a control assistant for the Invoicing bug intake system. ` +
             `You can answer questions about the queue and help the user manage investigations.\n\n` +
@@ -542,9 +549,14 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
         if (reply) await channel.sendMessage(chatJid, reply);
       } else if (chatJid === TELEGRAM_BUG_INTAKE_JID) {
         const ollamaChannel = findChannel(channels, TELEGRAM_OLLAMA_JID);
-        const senderName = missedMessages.filter(m => !m.is_from_me).pop()?.sender_name ?? 'App User';
+        const senderName =
+          missedMessages.filter((m) => !m.is_from_me).pop()?.sender_name ??
+          'App User';
         const userId = `app:${senderName.replace(/\W+/g, '_').toLowerCase()}`;
-        await channel.sendMessage(chatJid, 'Bug report received. Processing...');
+        await channel.sendMessage(
+          chatJid,
+          'Bug report received. Processing...',
+        );
         try {
           const result = await runSlackIntakeAgent(
             text,
@@ -554,7 +566,10 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
             userId,
           );
           if (result.type === 'drafted' && ollamaChannel) {
-            await channel.sendMessage(chatJid, `Draft ready — sent for review.`);
+            await channel.sendMessage(
+              chatJid,
+              `Draft ready — sent for review.`,
+            );
             for (const issue of result.issues) {
               await ollamaChannel.sendMessage(
                 TELEGRAM_OLLAMA_JID,
@@ -562,11 +577,17 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
               );
             }
           } else if (result.type === 'clarification') {
-            await channel.sendMessage(chatJid, `Could not draft issue: ${result.message}`);
+            await channel.sendMessage(
+              chatJid,
+              `Could not draft issue: ${result.message}`,
+            );
           }
         } catch (err) {
           logger.error({ err }, 'Telegram bug report intake error');
-          await channel.sendMessage(chatJid, `Bug report intake error: ${err instanceof Error ? err.message : String(err)}`);
+          await channel.sendMessage(
+            chatJid,
+            `Bug report intake error: ${err instanceof Error ? err.message : String(err)}`,
+          );
           ollamaChannel?.sendMessage(
             TELEGRAM_OLLAMA_JID,
             `Bug report intake error: ${err instanceof Error ? err.message : String(err)}`,

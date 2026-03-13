@@ -255,8 +255,7 @@ export async function processTaskIpc(
           data.context_mode === 'group' || data.context_mode === 'isolated'
             ? data.context_mode
             : 'isolated';
-        const agentType =
-          data.agent_type === 'ollama' ? 'ollama' : 'claude';
+        const agentType = data.agent_type === 'ollama' ? 'ollama' : 'claude';
         createTask({
           id: taskId,
           group_folder: targetFolder,

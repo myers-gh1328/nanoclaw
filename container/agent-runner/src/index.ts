@@ -410,6 +410,7 @@ async function runQuery(
         'mcp__nanoclaw__*',
         'mcp__ollama__*',
         'mcp__brave__*',
+        'mcp__mslearn__*',
       ],
       env: sdkEnv,
       permissionMode: 'bypassPermissions',
@@ -428,6 +429,10 @@ async function runQuery(
         ollama: {
           command: 'node',
           args: [path.join(path.dirname(mcpServerPath), 'ollama-mcp-stdio.js')],
+        },
+        mslearn: {
+          type: 'http',
+          url: 'https://learn.microsoft.com/api/mcp',
         },
         ...(process.env.BRAVE_API_KEY ? {
           brave: {

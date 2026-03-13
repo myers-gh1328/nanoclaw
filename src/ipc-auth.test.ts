@@ -592,7 +592,7 @@ describe('schedule_task context_mode', () => {
         schedule_type: 'once',
         schedule_value: '2025-06-01T00:00:00',
         context_mode: 'isolated',
-      agent_type: 'claude' as const,
+        agent_type: 'claude' as const,
         targetJid: 'other@g.us',
       },
       'whatsapp_main',
