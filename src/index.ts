@@ -64,6 +64,7 @@ import {
   fileGithubIssue,
   applyModificationAndFile,
   formatTelegramNotification,
+  INVOICING_REPO,
 } from './slack-intake.js';
 import {
   addToQueue,
@@ -182,14 +183,19 @@ async function triggerManualInvestigation(
 ): Promise<void> {
   const ghToken = await getGithubToken();
 
-  let issueJson: string;
+  let issueData: { title: string; body: string; labels: { name: string }[] };
   try {
-    issueJson = await executeBash(
-      `gh issue view ${issueNum} --repo myers-gh1328/Invoicing --json title,body,labels`,
+    const issueJson = await executeBash(
+      `gh issue view ${issueNum} --repo ${INVOICING_REPO} --json title,body,labels`,
       process.cwd(),
       ghToken,
     );
     if (issueJson.startsWith('Error:')) throw new Error(issueJson);
+    issueData = JSON.parse(issueJson) as {
+      title: string;
+      body: string;
+      labels: { name: string }[];
+    };
   } catch (err) {
     logger.error({ issueNum, err }, 'Failed to fetch issue for investigation');
     await telegramChannel.sendMessage(
@@ -198,12 +204,6 @@ async function triggerManualInvestigation(
     );
     return;
   }
-
-  const issueData = JSON.parse(issueJson) as {
-    title: string;
-    body: string;
-    labels: { name: string }[];
-  };
 
   const issue = {
     id: `manual-${issueNum}`,
@@ -398,7 +398,12 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
 
       if (parsed?.decision && parsed?.ref) {
         await channel.sendMessage(chatJid, 'On it...');
-        await handleIntakeApproval(parsed.decision, parsed.ref, channel, chatJid);
+        await handleIntakeApproval(
+          parsed.decision,
+          parsed.ref,
+          channel,
+          chatJid,
+        );
         commandHandled = true;
         continue;
       }

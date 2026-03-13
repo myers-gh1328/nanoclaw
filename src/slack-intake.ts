@@ -16,7 +16,7 @@ import {
   runOllamaAgent,
 } from './ollama-agent.js';
 
-const INVOICING_REPO = 'myers-gh1328/Invoicing';
+export const INVOICING_REPO = 'myers-gh1328/Invoicing';
 const INVOICING_PATH = path.join(os.homedir(), 'code', 'Invoicing');
 
 export interface PendingIssue {

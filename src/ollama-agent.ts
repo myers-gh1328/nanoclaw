@@ -4,7 +4,10 @@
  * run git/gh commands, read/write files, and manage GitHub issues.
  */
 
-import { execSync } from 'child_process';
+import { exec } from 'child_process';
+import { promisify } from 'util';
+
+const execAsync = promisify(exec);
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -243,36 +246,36 @@ export async function executeBash(
   workdir: string,
   ghToken: string | null,
 ): Promise<string> {
+  const env: Record<string, string> = {
+    ...(process.env as Record<string, string>),
+    HOME: os.homedir(),
+    PATH: `/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:${process.env.PATH || ''}`,
+  };
+  if (ghToken) {
+    env.GH_TOKEN = ghToken;
+    env.GITHUB_TOKEN = ghToken;
+    // Rewrite https://github.com/ to embed the token so git push works
+    // without needing ~/.gitconfig or gh auth login
+    env.GIT_CONFIG_COUNT = '1';
+    env.GIT_CONFIG_KEY_0 = `url.https://x-access-token:${ghToken}@github.com/.insteadOf`;
+    env.GIT_CONFIG_VALUE_0 = 'https://github.com/';
+  }
   try {
-    const env: Record<string, string> = {
-      ...(process.env as Record<string, string>),
-      HOME: os.homedir(),
-      PATH: `/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:${process.env.PATH || ''}`,
-    };
-    if (ghToken) {
-      env.GH_TOKEN = ghToken;
-      env.GITHUB_TOKEN = ghToken;
-      // Rewrite https://github.com/ to embed the token so git push works
-      // without needing ~/.gitconfig or gh auth login
-      env.GIT_CONFIG_COUNT = '1';
-      env.GIT_CONFIG_KEY_0 = `url.https://x-access-token:${ghToken}@github.com/.insteadOf`;
-      env.GIT_CONFIG_VALUE_0 = 'https://github.com/';
-    }
-    const output = execSync(command, {
+    const { stdout } = await execAsync(command, {
       cwd: workdir,
       env,
       timeout: 120_000,
       maxBuffer: 2 * 1024 * 1024,
     });
-    return output.toString().trim() || '(no output)';
+    return stdout.trim() || '(no output)';
   } catch (err: unknown) {
     const e = err as {
-      stdout?: Buffer;
-      stderr?: Buffer;
+      stdout?: string;
+      stderr?: string;
       message?: string;
     };
-    const out = e.stdout?.toString().trim();
-    const errMsg = e.stderr?.toString().trim() || e.message || String(err);
+    const out = e.stdout?.trim();
+    const errMsg = e.stderr?.trim() || e.message || String(err);
     return out ? `${out}\nError: ${errMsg}` : `Error: ${errMsg}`;
   }
 }

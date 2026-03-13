@@ -17,6 +17,9 @@ import {
 // Messages exceeding this are split into sequential chunks.
 const MAX_MESSAGE_LENGTH = 4000;
 
+// Cap the user name cache to prevent unbounded growth in large workspaces.
+const MAX_USER_CACHE = 500;
+
 // The message subtypes we process. Bolt delivers all subtypes via app.event('message');
 // we filter to regular messages (GenericMessageEvent, subtype undefined) and bot messages
 // (BotMessageEvent, subtype 'bot_message') so we can track our own output.
@@ -265,7 +268,12 @@ export class SlackChannel implements Channel {
     try {
       const result = await this.app.client.users.info({ user: userId });
       const name = result.user?.real_name || result.user?.name;
-      if (name) this.userNameCache.set(userId, name);
+      if (name) {
+        if (this.userNameCache.size >= MAX_USER_CACHE) {
+          this.userNameCache.delete(this.userNameCache.keys().next().value!);
+        }
+        this.userNameCache.set(userId, name);
+      }
       return name;
     } catch (err) {
       logger.debug({ userId, err }, 'Failed to resolve Slack user name');
@@ -283,11 +291,7 @@ export class SlackChannel implements Channel {
       );
       while (this.outgoingQueue.length > 0) {
         const item = this.outgoingQueue.shift()!;
-        const channelId = item.jid.replace(/^slack:/, '');
-        await this.app.client.chat.postMessage({
-          channel: channelId,
-          text: item.text,
-        });
+        await this.sendMessage(item.jid, item.text);
         logger.info(
           { jid: item.jid, length: item.text.length },
           'Queued Slack message sent',

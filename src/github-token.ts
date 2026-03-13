@@ -45,8 +45,18 @@ function makeJwt(appId: string, privateKey: string): string {
   return `${data}.${base64url(sig)}`;
 }
 
+// Cache the token so we don't make an API call on every Ollama invocation.
+// GitHub App installation tokens are valid for 1 hour; we refresh at 50 min.
+let cachedToken: string | null = null;
+let tokenExpiresAt = 0;
+const TOKEN_TTL_MS = 50 * 60 * 1000; // 50 minutes
+
 export async function getGithubToken(): Promise<string | null> {
   if (!APP_ID || !INSTALL_ID) return null;
+
+  if (cachedToken && Date.now() < tokenExpiresAt) {
+    return cachedToken;
+  }
 
   let pem: string;
   try {
@@ -76,6 +86,8 @@ export async function getGithubToken(): Promise<string | null> {
       logger.warn({ message: data.message }, 'GitHub token request failed');
       return null;
     }
+    cachedToken = data.token;
+    tokenExpiresAt = Date.now() + TOKEN_TTL_MS;
     logger.debug('GitHub App installation token generated');
     return data.token;
   } catch (err) {
