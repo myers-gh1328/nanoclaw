@@ -347,6 +347,8 @@ export async function runIntakeAgent(
     const existing = loadPendingIssues(groupFolder);
     existing.push(...newIssues);
     savePendingIssues(groupFolder, existing);
+    // Clear conversation history so future messages don't re-draft the same issue
+    clearOllamaHistory(userFolder);
     logger.info(
       {
         groupFolder,

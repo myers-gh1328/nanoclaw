@@ -345,21 +345,37 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       if (msg.is_from_me) continue;
       const text = msg.content.trim();
 
-      const parsed =
-        pendingRefs.length > 0
-          ? await parseIntent<{ decision: string; ref: string }>(
-              `{ "decision": "yes" | "yes claude" | "no", "ref": "<6-char hex id>" }`,
-              `The user is deciding whether to investigate a filed GitHub issue.\n` +
-                `Valid ref IDs: ${pendingRefs.join(', ')}.\n` +
-                `"decision" must be exactly "yes" (Ollama), "yes claude" (Claude agent), or "no" (skip).\n` +
-                `If the user says yes/investigate/look into/fix/sure/ok (or misspellings), that is "yes".\n` +
-                `If the user says no/skip/ignore/cancel/drop (or misspellings), that is "no".\n` +
-                `If the user says "yes claude" or "claude" or "use claude", that is "yes claude".\n` +
-                `If there is only one valid ref (${pendingRefs.length === 1 ? pendingRefs[0] : 'N/A'}) and no ref is mentioned, use that one.\n` +
-                `If no investigation intent is found, return null.`,
-              text,
-            )
-          : null;
+      // Fast path: try regex match first before calling the model.
+      // Handles bare "yes", "no", "yes claude" (with or without ref) reliably.
+      let parsed: { decision: string; ref: string } | null = null;
+      if (pendingRefs.length > 0) {
+        const onlyRef = pendingRefs.length === 1 ? pendingRefs[0] : null;
+        const regexMatch =
+          /^(yes claude|yes|no)\s*(?:\(ref:\s*([a-z0-9]+)\))?$/i.exec(text);
+        if (regexMatch) {
+          const decision = regexMatch[1].toLowerCase();
+          const ref = regexMatch[2]?.toLowerCase() ?? onlyRef;
+          if (ref && pendingRefs.includes(ref)) {
+            parsed = { decision, ref };
+          }
+        }
+
+        // Fall back to model-based parsing for informal phrasing
+        if (!parsed) {
+          parsed = await parseIntent<{ decision: string; ref: string }>(
+            `{ "decision": "yes" | "yes claude" | "no", "ref": "<6-char hex id>" }`,
+            `The user is deciding whether to investigate a filed GitHub issue.\n` +
+              `Valid ref IDs: ${pendingRefs.join(', ')}.\n` +
+              `"decision" must be exactly "yes" (Ollama), "yes claude" (Claude agent), or "no" (skip).\n` +
+              `If the user says yes/investigate/look into/fix/sure/ok (or misspellings), that is "yes".\n` +
+              `If the user says no/skip/ignore/cancel/drop (or misspellings), that is "no".\n` +
+              `If the user says "yes claude" or "claude" or "use claude", that is "yes claude".\n` +
+              `If there is only one valid ref (${onlyRef ?? 'N/A'}) and no ref is mentioned, use that one.\n` +
+              `If no investigation intent is found, return null.`,
+            text,
+          );
+        }
+      }
 
       if (parsed?.decision && parsed?.ref) {
         await channel.sendMessage(chatJid, 'On it...');
