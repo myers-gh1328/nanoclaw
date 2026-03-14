@@ -13,6 +13,7 @@ import { logger } from './logger.js';
 import {
   clearOllamaHistory,
   executeBash,
+  parseIntent,
   runOllamaAgent,
 } from './ollama-agent.js';
 
@@ -25,15 +26,15 @@ const INVOICING_PATH = path.join(os.homedir(), 'code', 'Invoicing');
 
 export interface PendingIssue {
   id: string;
-  sourceJid: string;      // JID of the channel the report came from
+  sourceJid: string; // JID of the channel the report came from
   reporterName: string;
   title: string;
   type: 'bug' | 'enhancement';
   body: string;
   labels: string[];
   createdAt: string;
-  issueNumber?: string;   // GitHub issue number (set after filing)
-  issueUrl?: string;      // GitHub issue URL (set after filing)
+  issueNumber?: string; // GitHub issue number (set after filing)
+  issueUrl?: string; // GitHub issue URL (set after filing)
 }
 
 function pendingPath(groupFolder: string): string {
@@ -177,35 +178,71 @@ function extractAllDraftJsons(content: string): DraftJson[] {
 }
 
 // ---------------------------------------------------------------------------
-// Intake system prompt
+// Intake system prompts
 // ---------------------------------------------------------------------------
 
-const INTAKE_SYSTEM_PROMPT = `You are an intake assistant for the Invoicing app. Users submit bug reports and feature requests. Your job is to gather enough information to file a high-quality GitHub issue.
+// Fast path: all required fields already present — draft immediately, no tools.
+const FAST_DRAFT_PROMPT = `You are drafting a GitHub issue for the Invoicing app from a complete report.
+All required information is already present. Draft immediately — no questions, no preamble.
 
-START: Read ${INVOICING_PATH}/docs/ai-triage/triage-index.md first — it has the system overview and links to all triage docs. Then read whichever of these are relevant to the report:
-- ${INVOICING_PATH}/docs/ai-triage/customer-language-map.md — translate vague customer phrases to technical meaning
-- ${INVOICING_PATH}/docs/ai-triage/triage-follow-up-questions.md — the right questions to ask per symptom class
+Output format:
+<draft>{"title": "...", "type": "bug" or "enhancement", "body": "...", "labels": [...]}</draft>
+
+Body format for bugs: ## Description, ## Steps to Reproduce (omit if not provided), ## Expected Behavior (omit if not provided), ## Actual Behavior, ## Likely Subsystem
+Body format for features: ## Problem, ## Proposed Solution
+
+One <draft> per distinct issue. Do not invent facts not in the report.`;
+
+// Conversational path: missing fields — read triage docs, ask questions, then draft.
+const CONVERSATIONAL_INTAKE_PROMPT = `You are an intake assistant for the Invoicing app. The report you received is missing some required information. Your job is to gather it and file a high-quality GitHub issue.
+
+START: Read ${INVOICING_PATH}/docs/ai-triage/triage-index.md first, then whichever are relevant:
+- ${INVOICING_PATH}/docs/ai-triage/customer-language-map.md — translate vague phrases to technical meaning
+- ${INVOICING_PATH}/docs/ai-triage/triage-follow-up-questions.md — the right questions per symptom class
 - ${INVOICING_PATH}/docs/ai-triage/known-issue-signatures.md — recognize recurring known issues
 
-REQUIRED FIELDS — a draft may NOT be filed until ALL of these are known:
-For bugs: page or URL where the issue occurs (a full URL like "https://example.com/SiteAdmin/Health" or a path like "admin/locations" both count), and a description of what went wrong. Expected behavior and steps to reproduce are optional — include them in the draft if provided, omit if not.
-For features: the problem being solved (page/URL only needed if it relates to an existing page — skip if it's a new page or flow)
+REQUIRED FIELDS — gather ALL before drafting:
+1. Type: is this a bug (something broken) or a feature request (new capability)?
+2. For bugs: the page or URL where it occurs + what went wrong
+3. For features: the problem being solved (page/URL only needed if related to an existing page)
 
-Reports arrive in a structured format with labeled fields (Page:, Description:, etc.). All required fields will always be present. Extract them directly and proceed immediately to DRAFT.
+After reading relevant docs, respond with EXACTLY ONE of:
 
-After reading the relevant docs, respond with EXACTLY ONE of:
+A) QUESTIONS — ask ONLY about what is still missing, in plain language. One message, specific questions only.
 
-A) QUESTIONS — never use this. All required fields are always provided.
-
-B) DRAFT — if ALL required fields are known. Use the language map to fill in implied technical context.
+B) DRAFT — once ALL required fields are known.
    <draft>{"title": "...", "type": "bug" or "enhancement", "body": "...", "labels": [...]}</draft>
    Body format for bugs: ## Description, ## Steps to Reproduce, ## Expected Behavior, ## Actual Behavior, ## Likely Subsystem
    Body format for features: ## Problem, ## Proposed Solution
-   One <draft> per distinct issue. Do not invent facts the user didn't provide.
+   One <draft> per distinct issue. Do not invent facts not provided.
 
-C) REDIRECT — if the message is off-topic: "This channel is for bug reports and feature requests for the Invoicing app."
+C) REDIRECT — if off-topic: "This channel is for bug reports and feature requests for the Invoicing app."
 
 Output ONLY the questions, draft(s), or redirect. No explanations, no preamble.`;
+
+// ---------------------------------------------------------------------------
+// Structure pre-check
+// ---------------------------------------------------------------------------
+
+interface StructureCheck {
+  hasType: boolean;     // clearly a bug or feature request
+  isBug: boolean;       // true = bug, false = feature (only meaningful if hasType)
+  hasDescription: boolean; // describes the problem or request
+  hasLocation: boolean; // mentions a page, URL, or location in the app
+}
+
+async function checkReportStructure(text: string): Promise<StructureCheck> {
+  const result = await parseIntent<StructureCheck>(
+    '{ "hasType": boolean, "isBug": boolean, "hasDescription": boolean, "hasLocation": boolean }',
+    `Analyze this report and determine:\n` +
+      `- hasType: is it clearly a bug (something broken) or feature request (new capability)?\n` +
+      `- isBug: true if it's a bug, false if it's a feature request\n` +
+      `- hasDescription: does it describe what the problem or request is?\n` +
+      `- hasLocation: does it mention a specific page, URL, or location in the app?`,
+    text,
+  );
+  return result ?? { hasType: false, isBug: false, hasDescription: false, hasLocation: false };
+}
 
 // ---------------------------------------------------------------------------
 // Intake agent
@@ -222,26 +259,56 @@ export async function runIntakeAgent(
   | { type: 'drafted'; issues: PendingIssue[] }
   | { type: 'redirect'; message: string }
 > {
-  // Use per-user subfolder so each reporter gets isolated conversation history
   const safeId = userId.replace(/[^a-zA-Z0-9_-]/g, '_');
   const userFolder = `${groupFolder}/history/${safeId}`;
 
+  logger.info({ groupFolder, reporterName, userId }, 'Intake: evaluating report');
+
+  // Phase 1: detect whether the report has all required fields
+  const structure = await checkReportStructure(text);
+  const isStructured =
+    structure.hasType &&
+    structure.hasDescription &&
+    (!structure.isBug || structure.hasLocation); // bugs need a location; features don't
+
   logger.info(
-    { groupFolder, reporterName, userId },
-    'Intake: evaluating report',
+    { groupFolder, ...structure, isStructured },
+    'Intake: structure check',
   );
 
-  const reply = await runOllamaAgent(text, userFolder, {
-    systemPrompt: INTAKE_SYSTEM_PROMPT,
-    allowedTools: ['read_file'],
-    model: 'llama3.2:1b',
-    numCtx: 8192,
-  });
+  let reply: string;
+
+  if (isStructured) {
+    // Fast path: draft directly, no tools, no file reading
+    const fastFolder = `${groupFolder}/history/_fast`;
+    clearOllamaHistory(fastFolder);
+    reply = await runOllamaAgent(text, fastFolder, {
+      systemPrompt: FAST_DRAFT_PROMPT,
+      allowedTools: [],
+      numCtx: 4096,
+    });
+    clearOllamaHistory(fastFolder);
+  } else {
+    // Conversational path: full model, reads triage docs, asks for missing fields
+    reply = await runOllamaAgent(text, userFolder, {
+      systemPrompt: CONVERSATIONAL_INTAKE_PROMPT,
+      allowedTools: ['read_file'],
+      numCtx: 16384,
+    });
+  }
 
   logger.info(
-    { groupFolder, reply: reply.slice(0, 200) },
+    { groupFolder, isStructured, replyLength: reply.length, reply: reply.slice(0, 200) },
     'Intake: raw reply',
   );
+
+  if (!reply.trim()) {
+    logger.warn({ groupFolder, reporterName, isStructured }, 'Intake: model returned empty reply');
+    return {
+      type: 'clarification',
+      message: 'Sorry, I had trouble processing that. Could you try describing the issue again?',
+    };
+  }
 
   const draftJsons = extractAllDraftJsons(reply);
   if (draftJsons.length > 0) {
