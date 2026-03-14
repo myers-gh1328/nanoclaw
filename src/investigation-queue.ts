@@ -8,7 +8,7 @@ import fs from 'fs';
 import path from 'path';
 
 import { logger } from './logger.js';
-import { runBugInvestigation, PendingIssue } from './slack-intake.js';
+import { runBugInvestigation, PendingIssue } from './issue-intake.js';
 import { Channel } from './types.js';
 
 export interface QueuedInvestigation {

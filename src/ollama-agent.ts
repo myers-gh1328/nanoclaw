@@ -280,6 +280,41 @@ export async function executeBash(
   }
 }
 
+/**
+ * Repair JSON that has literal newlines/tabs inside string values.
+ * LLMs sometimes forget to escape control characters in multi-line content fields.
+ */
+function repairJsonStrings(s: string): string {
+  let result = '';
+  let inString = false;
+  let escaped = false;
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i];
+    if (escaped) {
+      result += ch;
+      escaped = false;
+      continue;
+    }
+    if (ch === '\\' && inString) {
+      result += ch;
+      escaped = true;
+      continue;
+    }
+    if (ch === '"') {
+      inString = !inString;
+      result += ch;
+      continue;
+    }
+    if (inString) {
+      if (ch === '\n') { result += '\\n'; continue; }
+      if (ch === '\r') { result += '\\r'; continue; }
+      if (ch === '\t') { result += '\\t'; continue; }
+    }
+    result += ch;
+  }
+  return result;
+}
+
 function parseContentToolCall(
   content: string,
 ): { name: string; arguments: Record<string, unknown> } | null {
@@ -296,6 +331,8 @@ function parseContentToolCall(
     .replace(/\s*```\s*$/, '')
     .trim();
   candidates.push(stripped);
+  // Also try with repaired string escaping (handles literal newlines in content fields)
+  candidates.push(repairJsonStrings(stripped));
 
   // 2. Extract embedded JSON objects from within text using brace counting
   // (regex with non-greedy match fails on nested objects)
@@ -326,7 +363,11 @@ function parseContentToolCall(
         if (depth === 0) break;
       }
     }
-    if (depth === 0) candidates.push(content.slice(start, end + 1));
+    if (depth === 0) {
+      const slice = content.slice(start, end + 1);
+      candidates.push(slice);
+      candidates.push(repairJsonStrings(slice));
+    }
   }
 
   for (const candidate of candidates) {
@@ -345,11 +386,9 @@ function parseContentToolCall(
   return null;
 }
 
-const INTENT_MODEL = 'llama3.2:1b';
-
 /**
- * Use a fast local model to parse user intent from a free-form message.
- * Handles typos, misspellings, and informal phrasing.
+ * Parse user intent from a free-form message using the chat agent.
+ * Uses the chat endpoint (better instruction following) with the tiny model.
  *
  * @param schema - JSON schema describing the fields to extract
  * @param context - Additional context to help the model (e.g. list of valid refs)
@@ -361,35 +400,33 @@ export async function parseIntent<T>(
   context: string,
   text: string,
 ): Promise<T | null> {
-  const prompt = `You are a strict JSON extractor. Extract structured data from the user message below.
-${context}
+  const systemPrompt =
+    `You are a strict JSON extractor. Extract structured data from user messages.\n` +
+    `Return ONLY valid JSON — no explanation, no markdown, no code fences.\n` +
+    `If you cannot confidently extract the data, return exactly: null`;
 
-Return ONLY valid JSON matching this schema — no explanation, no markdown:
-${schema}
+  const prompt =
+    `${context}\n\n` +
+    `Schema: ${schema}\n\n` +
+    `Message: "${text}"`;
 
-If you cannot confidently extract the data, return: null
-
-User message: "${text}"`;
-
+  // Use an isolated folder so intent checks never pollute conversation history
+  const folder = '_intent';
+  clearOllamaHistory(folder);
   try {
-    const res = await fetch(`${OLLAMA_HOST}/api/generate`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model: INTENT_MODEL,
-        prompt,
-        stream: false,
-        format: 'json',
-        options: { temperature: 0, num_predict: 200 },
-      }),
+    const reply = await runOllamaAgent(prompt, folder, {
+      systemPrompt,
+      allowedTools: [],
+      model: 'llama3.2:1b',
+      numCtx: 2048,
     });
-    if (!res.ok) return null;
-    const data = (await res.json()) as { response?: string };
-    const raw = (data.response ?? '').trim();
+    clearOllamaHistory(folder);
+    const raw = reply.trim();
     if (!raw || raw === 'null') return null;
     return JSON.parse(raw) as T;
   } catch (err) {
     logger.warn({ err }, 'parseIntent failed');
+    clearOllamaHistory(folder);
     return null;
   }
 }
@@ -535,7 +572,7 @@ export async function runOllamaAgent(
           : args;
 
       logger.info(
-        { groupFolder, tool: name, command: parsed['command'] },
+        { groupFolder, tool: name, command: parsed['command'], path: parsed['path'] },
         'Ollama tool call',
       );
 

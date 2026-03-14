@@ -1,7 +1,7 @@
 /**
- * Slack intake agent for bug reports and feature requests.
- * Screens reports, asks clarifying questions, drafts GitHub issues,
- * and saves pending confirmations for Telegram approval.
+ * Intake agent for bug reports and feature requests from any channel.
+ * Screens reports, drafts and files GitHub issues,
+ * then asks the reporter whether they want to investigate it (via Ollama or Claude).
  */
 
 import crypto from 'crypto';
@@ -19,20 +19,22 @@ import {
 export const INVOICING_REPO = 'myers-gh1328/Invoicing';
 const INVOICING_PATH = path.join(os.homedir(), 'code', 'Invoicing');
 
+// ---------------------------------------------------------------------------
+// Pending investigation decisions
+// ---------------------------------------------------------------------------
+
 export interface PendingIssue {
   id: string;
-  slackJid: string;
+  sourceJid: string;      // JID of the channel the report came from
   reporterName: string;
   title: string;
   type: 'bug' | 'enhancement';
   body: string;
   labels: string[];
   createdAt: string;
+  issueNumber?: string;   // GitHub issue number (set after filing)
+  issueUrl?: string;      // GitHub issue URL (set after filing)
 }
-
-// ---------------------------------------------------------------------------
-// Pending issues file
-// ---------------------------------------------------------------------------
 
 function pendingPath(groupFolder: string): string {
   return path.join(process.cwd(), 'groups', groupFolder, 'pending-issues.json');
@@ -62,15 +64,13 @@ export function findPendingIssue(
 }
 
 // ---------------------------------------------------------------------------
-// Per-user intake history
-// ---------------------------------------------------------------------------
-
-// ---------------------------------------------------------------------------
 // Approval / notification helpers
 // ---------------------------------------------------------------------------
 
+// Matches: "yes (ref: abc123)", "no (ref: abc123)", "yes claude (ref: abc123)"
+// "yes claude" must come before "yes" so the longer token is tried first
 export const APPROVAL_PATTERN =
-  /^(yes|no|yes but .+)\s*\(ref:\s*([a-z0-9]+)\)/i;
+  /^(yes claude|yes|no)\s*\(ref:\s*([a-z0-9]+)\)/i;
 
 export function parseApprovalReply(
   text: string,
@@ -80,18 +80,18 @@ export function parseApprovalReply(
   return { decision: match[1].trim(), ref: match[2].trim() };
 }
 
-export function formatTelegramNotification(issue: PendingIssue): string {
-  const typeLabel = issue.type === 'bug' ? 'Bug report' : 'Feature request';
-  const bodyPreview =
-    issue.body.length > 300 ? issue.body.slice(0, 300) + '...' : issue.body;
+export function formatInvestigationQuestion(issue: PendingIssue): string {
+  const typeLabel = issue.type === 'bug' ? 'Bug' : 'Feature request';
+  const issueRef = issue.issueUrl
+    ? `Issue filed: ${issue.issueUrl}`
+    : `Issue queued for filing`;
   return (
-    `New ${typeLabel} from @${issue.reporterName}:\n` +
-    `Title: ${issue.title}\n` +
-    `Labels: ${issue.labels.join(', ')}\n\n` +
-    `${bodyPreview}\n\n` +
-    `To approve: yes (ref: ${issue.id})\n` +
-    `To reject: no (ref: ${issue.id})\n` +
-    `To modify: yes but [describe changes] (ref: ${issue.id})`
+    `${typeLabel} from @${issue.reporterName}: ${issue.title}\n` +
+    `${issueRef}\n\n` +
+    `Do you want to work on it?\n` +
+    `  yes (ref: ${issue.id}) — Ollama investigates\n` +
+    `  yes claude (ref: ${issue.id}) — route to Claude agent\n` +
+    `  no (ref: ${issue.id}) — skip`
   );
 }
 
@@ -180,12 +180,12 @@ function extractAllDraftJsons(content: string): DraftJson[] {
 // Intake system prompt
 // ---------------------------------------------------------------------------
 
-const INTAKE_SYSTEM_PROMPT = `You are an intake assistant for the Invoicing app. Users submit bug reports and feature requests via Slack. Your job is to gather enough information to file a high-quality GitHub issue.
+const INTAKE_SYSTEM_PROMPT = `You are an intake assistant for the Invoicing app. Users submit bug reports and feature requests. Your job is to gather enough information to file a high-quality GitHub issue.
 
 START: Read ${INVOICING_PATH}/docs/ai-triage/triage-index.md first — it has the system overview and links to all triage docs. Then read whichever of these are relevant to the report:
-- docs/ai-triage/customer-language-map.md — translate vague customer phrases to technical meaning
-- docs/ai-triage/triage-follow-up-questions.md — the right questions to ask per symptom class
-- docs/ai-triage/known-issue-signatures.md — recognize recurring known issues
+- ${INVOICING_PATH}/docs/ai-triage/customer-language-map.md — translate vague customer phrases to technical meaning
+- ${INVOICING_PATH}/docs/ai-triage/triage-follow-up-questions.md — the right questions to ask per symptom class
+- ${INVOICING_PATH}/docs/ai-triage/known-issue-signatures.md — recognize recurring known issues
 
 REQUIRED FIELDS — a draft may NOT be filed until ALL of these are known:
 For bugs: page or URL where the issue occurs (a full URL like "https://example.com/SiteAdmin/Health" or a path like "admin/locations" both count), and a description of what went wrong. Expected behavior and steps to reproduce are optional — include them in the draft if provided, omit if not.
@@ -211,11 +211,11 @@ Output ONLY the questions, draft(s), or redirect. No explanations, no preamble.`
 // Intake agent
 // ---------------------------------------------------------------------------
 
-export async function runSlackIntakeAgent(
+export async function runIntakeAgent(
   text: string,
   groupFolder: string,
   reporterName: string,
-  slackJid: string,
+  sourceJid: string,
   userId: string,
 ): Promise<
   | { type: 'clarification'; message: string }
@@ -228,7 +228,7 @@ export async function runSlackIntakeAgent(
 
   logger.info(
     { groupFolder, reporterName, userId },
-    'Slack intake: evaluating report',
+    'Intake: evaluating report',
   );
 
   const reply = await runOllamaAgent(text, userFolder, {
@@ -240,14 +240,14 @@ export async function runSlackIntakeAgent(
 
   logger.info(
     { groupFolder, reply: reply.slice(0, 200) },
-    'Slack intake: raw reply',
+    'Intake: raw reply',
   );
 
   const draftJsons = extractAllDraftJsons(reply);
   if (draftJsons.length > 0) {
     const newIssues: PendingIssue[] = draftJsons.map((draftJson) => ({
       id: crypto.randomBytes(3).toString('hex'),
-      slackJid,
+      sourceJid,
       reporterName,
       title: draftJson.title,
       type:
@@ -267,7 +267,7 @@ export async function runSlackIntakeAgent(
         count: newIssues.length,
         titles: newIssues.map((i) => i.title),
       },
-      'Slack intake: drafted issues',
+      'Intake: drafted issues',
     );
     return { type: 'drafted', issues: newIssues };
   }
@@ -324,23 +324,6 @@ export async function fileGithubIssue(
       /* already gone */
     }
   }
-}
-
-export async function applyModificationAndFile(
-  issue: PendingIssue,
-  modification: string,
-  groupFolder: string,
-): Promise<string> {
-  const prompt =
-    `Apply this modification to the following GitHub issue draft, then file it in the ${INVOICING_REPO} repo using the gh CLI.\n\n` +
-    `Modification: ${modification}\n\n` +
-    `Issue draft:\n` +
-    `Title: ${issue.title}\n` +
-    `Type: ${issue.type}\n` +
-    `Labels: ${issue.labels.join(', ')}\n` +
-    `Body:\n${issue.body}\n\n` +
-    `Use gh issue create --repo ${INVOICING_REPO} with the modified title and body. Report the URL when done.`;
-  return runOllamaAgent(prompt, groupFolder);
 }
 
 // ---------------------------------------------------------------------------

@@ -56,16 +56,14 @@ import {
 import { startSchedulerLoop } from './task-scheduler.js';
 import { executeBash, runOllamaAgent, parseIntent } from './ollama-agent.js';
 import {
-  runSlackIntakeAgent,
-  parseApprovalReply,
+  runIntakeAgent,
   loadPendingIssues,
   findPendingIssue,
   savePendingIssues,
   fileGithubIssue,
-  applyModificationAndFile,
-  formatTelegramNotification,
+  formatInvestigationQuestion,
   INVOICING_REPO,
-} from './slack-intake.js';
+} from './issue-intake.js';
 import {
   addToQueue,
   startWorkerLoop,
@@ -80,7 +78,7 @@ const TELEGRAM_MAIN_JID = 'tg:8388828787';
 const TELEGRAM_OLLAMA_JID = 'tgo:8388828787';
 const TELEGRAM_BUG_INTAKE_JID = 'tgo:-5191721027';
 const SLACK_INTAKE_JID = 'slack:C0AL0D2K79R';
-const SLACK_INTAKE_GROUP_FOLDER = 'slack_bug_reports';
+const INTAKE_GROUP_FOLDER = 'slack_bug_reports';
 
 // Re-export for backwards compatibility during refactor
 export { escapeXml, formatMessages } from './router.js';
@@ -207,7 +205,7 @@ async function triggerManualInvestigation(
 
   const issue = {
     id: `manual-${issueNum}`,
-    slackJid: SLACK_INTAKE_JID,
+    sourceJid: telegramJid,
     reporterName: 'manual',
     title: issueData.title,
     type: 'bug' as const,
@@ -226,94 +224,56 @@ async function triggerManualInvestigation(
 async function handleIntakeApproval(
   decision: string,
   ref: string,
-  telegramChannel: Channel,
-  telegramJid: string,
+  channel: Channel,
+  chatJid: string,
 ): Promise<void> {
-  const issues = loadPendingIssues(SLACK_INTAKE_GROUP_FOLDER);
+  const issues = loadPendingIssues(INTAKE_GROUP_FOLDER);
   const issue = findPendingIssue(issues, ref);
   if (!issue) {
-    await telegramChannel.sendMessage(
-      telegramJid,
-      `No pending issue with ref ${ref}.`,
-    );
+    await channel.sendMessage(chatJid, `No pending issue with ref ${ref}.`);
     return;
   }
 
   const remaining = issues.filter((i) => i.id !== ref);
-  const ghToken = await getGithubToken();
   const lower = decision.toLowerCase();
 
   if (lower === 'no') {
-    savePendingIssues(SLACK_INTAKE_GROUP_FOLDER, remaining);
-    await telegramChannel.sendMessage(telegramJid, `Issue ${ref} dropped.`);
-    const slackChannel = findChannel(channels, issue.slackJid);
-    if (slackChannel) {
-      await slackChannel.sendMessage(
-        issue.slackJid,
-        `Hi @${issue.reporterName} — your report was reviewed and won't be filed at this time. Feel free to add more detail and resubmit.`,
-      );
-    }
+    savePendingIssues(INTAKE_GROUP_FOLDER, remaining);
+    await channel.sendMessage(
+      chatJid,
+      `Ok, skipping investigation for issue ${issue.issueNumber ? `#${issue.issueNumber}` : ref}.`,
+    );
   } else if (lower === 'yes') {
-    try {
-      const url = await fileGithubIssue(issue, ghToken);
-      savePendingIssues(SLACK_INTAKE_GROUP_FOLDER, remaining);
-      await telegramChannel.sendMessage(telegramJid, `Filed: ${url}`);
-      const issueNum = url.trim().match(/\/issues\/(\d+)/)?.[1];
-      const slackChannel = findChannel(channels, issue.slackJid);
-      if (slackChannel && issueNum) {
-        await slackChannel.sendMessage(
-          issue.slackJid,
-          `@${issue.reporterName} I created issue #${issueNum} for you.`,
-        );
-      }
-      // For bugs, queue for investigation
-      if (issue.type === 'bug' && issueNum) {
-        addToQueue(issueNum, issue.title, issue);
-        await telegramChannel.sendMessage(
-          telegramJid,
-          `Filed and queued for investigation.`,
-        );
-      }
-    } catch (err) {
-      await telegramChannel.sendMessage(
-        telegramJid,
-        `Error filing issue: ${err instanceof Error ? err.message : String(err)}`,
+    savePendingIssues(INTAKE_GROUP_FOLDER, remaining);
+    const issueNum = issue.issueNumber;
+    if (issueNum) {
+      addToQueue(issueNum, issue.title, issue);
+      await channel.sendMessage(
+        chatJid,
+        `Queued #${issueNum} for Ollama investigation.`,
+      );
+    } else {
+      await channel.sendMessage(
+        chatJid,
+        `Issue has no number — cannot queue for investigation.`,
       );
     }
-  } else {
-    // "yes but X"
-    const modification = decision.replace(/^yes but\s+/i, '').trim();
-    try {
-      const reply = await applyModificationAndFile(
-        issue,
-        modification,
-        SLACK_INTAKE_GROUP_FOLDER,
-      );
-      savePendingIssues(SLACK_INTAKE_GROUP_FOLDER, remaining);
-      await telegramChannel.sendMessage(telegramJid, reply);
-      // Extract URL and issue number from agent reply so we can notify Slack and queue
-      const url = reply.match(
-        /https:\/\/github\.com\/[^\s]+\/issues\/\d+/,
-      )?.[0];
-      const issueNum = url?.match(/\/issues\/(\d+)/)?.[1];
-      const slackChannel = findChannel(channels, issue.slackJid);
-      if (slackChannel && issueNum) {
-        await slackChannel.sendMessage(
-          issue.slackJid,
-          `@${issue.reporterName} I created issue #${issueNum} for you.`,
+  } else if (lower === 'yes claude') {
+    savePendingIssues(INTAKE_GROUP_FOLDER, remaining);
+    const issueNum = issue.issueNumber;
+    if (issueNum) {
+      await channel.sendMessage(chatJid, `Routing #${issueNum} to Claude agent...`);
+      triggerManualInvestigation(issueNum, channel, chatJid).catch((err) => {
+        logger.error({ issueNum, err }, 'Claude investigation error');
+        channel.sendMessage(
+          chatJid,
+          `Investigation error: ${err instanceof Error ? err.message : String(err)}`,
         );
-      }
-      if (issue.type === 'bug' && issueNum) {
-        addToQueue(issueNum, issue.title, issue);
-        await telegramChannel.sendMessage(
-          telegramJid,
-          `Filed and queued for investigation.`,
-        );
-      }
-    } catch (err) {
-      await telegramChannel.sendMessage(
-        telegramJid,
-        `Error filing issue: ${err instanceof Error ? err.message : String(err)}`,
+      });
+    } else {
+      await channel.sendMessage(
+        chatJid,
+        `Issue has no number — cannot route to Claude agent.`,
       );
     }
   }
@@ -369,12 +329,13 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     'Processing messages',
   );
 
-  // Check for intake approval replies and investigate commands in the Ollama Telegram bot
-  // (must run before the Ollama routing block since tgo: matches isOllamaChat)
-  if (chatJid === TELEGRAM_OLLAMA_JID) {
-    // Load once outside the loop — disk read shouldn't happen per-message
-    const pending = loadPendingIssues(SLACK_INTAKE_GROUP_FOLDER);
-    const pendingRefs = pending.map((i) => i.id);
+  // Check for intake investigation replies in any channel that has pending issues
+  // sourced from this JID. Must run before Ollama routing since tgo:/slack: prefixes
+  // are also matched by the Ollama routing block below.
+  {
+    const allPending = loadPendingIssues(INTAKE_GROUP_FOLDER);
+    const pendingForChannel = allPending.filter((i) => i.sourceJid === chatJid);
+    const pendingRefs = pendingForChannel.map((i) => i.id);
 
     let commandHandled = false;
     for (const msg of missedMessages) {
@@ -384,14 +345,15 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       const parsed =
         pendingRefs.length > 0
           ? await parseIntent<{ decision: string; ref: string }>(
-              `{ "decision": "yes" | "no" | "yes but <modification>", "ref": "<6-char hex id>" }`,
-              `The user is approving or rejecting a pending issue draft.\n` +
+              `{ "decision": "yes" | "yes claude" | "no", "ref": "<6-char hex id>" }`,
+              `The user is deciding whether to investigate a filed GitHub issue.\n` +
                 `Valid ref IDs: ${pendingRefs.join(', ')}.\n` +
-                `"decision" must be exactly "yes", "no", or "yes but <what to change>".\n` +
-                `If the user says yes/approve/ok/sure/looks good (or misspellings), that is "yes".\n` +
-                `If the user says no/reject/cancel/skip/drop (or misspellings), that is "no".\n` +
+                `"decision" must be exactly "yes" (Ollama), "yes claude" (Claude agent), or "no" (skip).\n` +
+                `If the user says yes/investigate/look into/fix/sure/ok (or misspellings), that is "yes".\n` +
+                `If the user says no/skip/ignore/cancel/drop (or misspellings), that is "no".\n` +
+                `If the user says "yes claude" or "claude" or "use claude", that is "yes claude".\n` +
                 `If there is only one valid ref (${pendingRefs.length === 1 ? pendingRefs[0] : 'N/A'}) and no ref is mentioned, use that one.\n` +
-                `If no approval intent is found, return null.`,
+                `If no investigation intent is found, return null.`,
               text,
             )
           : null;
@@ -408,40 +370,43 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
         continue;
       }
 
-      // Queue status command
-      if (/^queue$/i.test(text)) {
-        await channel.sendMessage(chatJid, formatQueueStatus());
-        commandHandled = true;
-        continue;
-      }
-
-      // Investigation decision: "manual 227" or "claude 227"
-      const decisionMatch = /^(manual|claude)\s+(\d+)$/i.exec(text);
-      if (decisionMatch) {
-        const action = decisionMatch[1].toLowerCase();
-        const issueNum = decisionMatch[2];
-        if (action === 'claude') {
-          await channel.sendMessage(
-            chatJid,
-            `Queuing #${issueNum} for Claude agent...`,
-          );
-          triggerManualInvestigation(issueNum, channel, chatJid).catch(
-            (err) => {
-              logger.error({ issueNum, err }, 'Claude investigation error');
-              channel.sendMessage(
-                chatJid,
-                `Investigation error: ${err instanceof Error ? err.message : String(err)}`,
-              );
-            },
-          );
-        } else {
-          await channel.sendMessage(
-            chatJid,
-            `Ok, #${issueNum} is on you. I'll leave it open.`,
-          );
+      // Queue status and manual investigation commands — only in the developer's Ollama bot
+      if (chatJid === TELEGRAM_OLLAMA_JID) {
+        // Queue status command
+        if (/^queue$/i.test(text)) {
+          await channel.sendMessage(chatJid, formatQueueStatus());
+          commandHandled = true;
+          continue;
         }
-        commandHandled = true;
-        continue;
+
+        // Investigation decision: "manual 227" or "claude 227"
+        const decisionMatch = /^(manual|claude)\s+(\d+)$/i.exec(text);
+        if (decisionMatch) {
+          const action = decisionMatch[1].toLowerCase();
+          const issueNum = decisionMatch[2];
+          if (action === 'claude') {
+            await channel.sendMessage(
+              chatJid,
+              `Queuing #${issueNum} for Claude agent...`,
+            );
+            triggerManualInvestigation(issueNum, channel, chatJid).catch(
+              (err) => {
+                logger.error({ issueNum, err }, 'Claude investigation error');
+                channel.sendMessage(
+                  chatJid,
+                  `Investigation error: ${err instanceof Error ? err.message : String(err)}`,
+                );
+              },
+            );
+          } else {
+            await channel.sendMessage(
+              chatJid,
+              `Ok, #${issueNum} is on you. I'll leave it open.`,
+            );
+          }
+          commandHandled = true;
+          continue;
+        }
       }
     }
     if (commandHandled) return true;
@@ -488,7 +453,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
             `Thanks @${reporterName}, reviewing your report...`,
           );
           try {
-            const result = await runSlackIntakeAgent(
+            const result = await runIntakeAgent(
               msg.content,
               group.folder,
               reporterName,
@@ -496,19 +461,30 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
               userId,
             );
             if (result.type === 'drafted') {
-              await channel.sendMessage(
-                chatJid,
-                `Got it @${reporterName} — I've drafted an issue and sent it for review.`,
-              );
-              const telegramChannel = findChannel(
-                channels,
-                TELEGRAM_OLLAMA_JID,
-              );
-              if (telegramChannel) {
-                for (const issue of result.issues) {
-                  await telegramChannel.sendMessage(
-                    TELEGRAM_OLLAMA_JID,
-                    formatTelegramNotification(issue),
+              const ghToken = await getGithubToken();
+              for (const issue of result.issues) {
+                try {
+                  const url = await fileGithubIssue(issue, ghToken);
+                  const issueNum = url.trim().match(/\/issues\/(\d+)/)?.[1];
+                  issue.issueNumber = issueNum;
+                  issue.issueUrl = url.trim();
+                  // Update stored pending issue with number/url
+                  const pending = loadPendingIssues(INTAKE_GROUP_FOLDER);
+                  const stored = pending.find((p) => p.id === issue.id);
+                  if (stored) {
+                    stored.issueNumber = issue.issueNumber;
+                    stored.issueUrl = issue.issueUrl;
+                    savePendingIssues(INTAKE_GROUP_FOLDER, pending);
+                  }
+                  await channel.sendMessage(
+                    chatJid,
+                    formatInvestigationQuestion(issue),
+                  );
+                } catch (fileErr) {
+                  logger.error({ err: fileErr }, 'Failed to file GitHub issue');
+                  await channel.sendMessage(
+                    chatJid,
+                    `@${reporterName} — issue drafted but filing failed. Please retry or contact support.`,
                   );
                 }
               }
@@ -516,7 +492,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
               await channel.sendMessage(chatJid, result.message);
             }
           } catch (err) {
-            logger.error({ reporterName, userId, err }, 'Slack intake error');
+            logger.error({ reporterName, userId, err }, 'Intake error');
             await channel.sendMessage(
               chatJid,
               `Sorry @${reporterName}, something went wrong. Please try again.`,
@@ -574,7 +550,6 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
         });
         if (reply) await channel.sendMessage(chatJid, reply);
       } else if (chatJid === TELEGRAM_BUG_INTAKE_JID) {
-        const ollamaChannel = findChannel(channels, TELEGRAM_OLLAMA_JID);
         const senderName =
           missedMessages.filter((m) => !m.is_from_me).pop()?.sender_name ??
           'App User';
@@ -584,23 +559,40 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
           'Bug report received. Processing...',
         );
         try {
-          const result = await runSlackIntakeAgent(
+          const result = await runIntakeAgent(
             text,
-            SLACK_INTAKE_GROUP_FOLDER,
+            INTAKE_GROUP_FOLDER,
             senderName,
-            TELEGRAM_OLLAMA_JID,
+            chatJid,
             userId,
           );
-          if (result.type === 'drafted' && ollamaChannel) {
-            await channel.sendMessage(
-              chatJid,
-              `Draft ready — sent for review.`,
-            );
+          if (result.type === 'drafted') {
+            const ghToken = await getGithubToken();
             for (const issue of result.issues) {
-              await ollamaChannel.sendMessage(
-                TELEGRAM_OLLAMA_JID,
-                formatTelegramNotification(issue),
-              );
+              try {
+                const url = await fileGithubIssue(issue, ghToken);
+                const issueNum = url.trim().match(/\/issues\/(\d+)/)?.[1];
+                issue.issueNumber = issueNum;
+                issue.issueUrl = url.trim();
+                // Update stored pending issue with number/url
+                const pending = loadPendingIssues(INTAKE_GROUP_FOLDER);
+                const stored = pending.find((p) => p.id === issue.id);
+                if (stored) {
+                  stored.issueNumber = issue.issueNumber;
+                  stored.issueUrl = issue.issueUrl;
+                  savePendingIssues(INTAKE_GROUP_FOLDER, pending);
+                }
+                await channel.sendMessage(
+                  chatJid,
+                  formatInvestigationQuestion(issue),
+                );
+              } catch (fileErr) {
+                logger.error({ err: fileErr }, 'Failed to file GitHub issue');
+                await channel.sendMessage(
+                  chatJid,
+                  `Issue drafted but filing failed. Please retry.`,
+                );
+              }
             }
           } else if (result.type === 'clarification') {
             await channel.sendMessage(
@@ -609,14 +601,10 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
             );
           }
         } catch (err) {
-          logger.error({ err }, 'Telegram bug report intake error');
+          logger.error({ err }, 'Intake error (Telegram bug intake)');
           await channel.sendMessage(
             chatJid,
-            `Bug report intake error: ${err instanceof Error ? err.message : String(err)}`,
-          );
-          ollamaChannel?.sendMessage(
-            TELEGRAM_OLLAMA_JID,
-            `Bug report intake error: ${err instanceof Error ? err.message : String(err)}`,
+            `Intake error: ${err instanceof Error ? err.message : String(err)}`,
           );
         }
       } else {
