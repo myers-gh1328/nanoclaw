@@ -225,8 +225,8 @@ Output ONLY the questions, draft(s), or redirect. No explanations, no preamble.`
 // ---------------------------------------------------------------------------
 
 interface StructureCheck {
-  hasType: boolean;     // clearly a bug or feature request
-  isBug: boolean;       // true = bug, false = feature (only meaningful if hasType)
+  hasType: boolean; // clearly a bug or feature request
+  isBug: boolean; // true = bug, false = feature (only meaningful if hasType)
   hasDescription: boolean; // describes the problem or request
   hasLocation: boolean; // mentions a page, URL, or location in the app
 }
@@ -241,7 +241,14 @@ async function checkReportStructure(text: string): Promise<StructureCheck> {
       `- hasLocation: does it mention a specific page, URL, or location in the app?`,
     text,
   );
-  return result ?? { hasType: false, isBug: false, hasDescription: false, hasLocation: false };
+  return (
+    result ?? {
+      hasType: false,
+      isBug: false,
+      hasDescription: false,
+      hasLocation: false,
+    }
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -262,7 +269,10 @@ export async function runIntakeAgent(
   const safeId = userId.replace(/[^a-zA-Z0-9_-]/g, '_');
   const userFolder = `${groupFolder}/history/${safeId}`;
 
-  logger.info({ groupFolder, reporterName, userId }, 'Intake: evaluating report');
+  logger.info(
+    { groupFolder, reporterName, userId },
+    'Intake: evaluating report',
+  );
 
   // Phase 1: detect whether the report has all required fields
   const structure = await checkReportStructure(text);
@@ -298,15 +308,24 @@ export async function runIntakeAgent(
   }
 
   logger.info(
-    { groupFolder, isStructured, replyLength: reply.length, reply: reply.slice(0, 200) },
+    {
+      groupFolder,
+      isStructured,
+      replyLength: reply.length,
+      reply: reply.slice(0, 200),
+    },
     'Intake: raw reply',
   );
 
   if (!reply.trim()) {
-    logger.warn({ groupFolder, reporterName, isStructured }, 'Intake: model returned empty reply');
+    logger.warn(
+      { groupFolder, reporterName, isStructured },
+      'Intake: model returned empty reply',
+    );
     return {
       type: 'clarification',
-      message: 'Sorry, I had trouble processing that. Could you try describing the issue again?',
+      message:
+        'Sorry, I had trouble processing that. Could you try describing the issue again?',
     };
   }
 

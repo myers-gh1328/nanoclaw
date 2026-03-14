@@ -306,9 +306,18 @@ function repairJsonStrings(s: string): string {
       continue;
     }
     if (inString) {
-      if (ch === '\n') { result += '\\n'; continue; }
-      if (ch === '\r') { result += '\\r'; continue; }
-      if (ch === '\t') { result += '\\t'; continue; }
+      if (ch === '\n') {
+        result += '\\n';
+        continue;
+      }
+      if (ch === '\r') {
+        result += '\\r';
+        continue;
+      }
+      if (ch === '\t') {
+        result += '\\t';
+        continue;
+      }
     }
     result += ch;
   }
@@ -406,9 +415,7 @@ export async function parseIntent<T>(
     `If you cannot confidently extract the data, return exactly: null`;
 
   const prompt =
-    `${context}\n\n` +
-    `Schema: ${schema}\n\n` +
-    `Message: "${text}"`;
+    `${context}\n\n` + `Schema: ${schema}\n\n` + `Message: "${text}"`;
 
   // Use an isolated folder so intent checks never pollute conversation history
   const folder = '_intent';
@@ -572,7 +579,12 @@ export async function runOllamaAgent(
           : args;
 
       logger.info(
-        { groupFolder, tool: name, command: parsed['command'], path: parsed['path'] },
+        {
+          groupFolder,
+          tool: name,
+          command: parsed['command'],
+          path: parsed['path'],
+        },
         'Ollama tool call',
       );
 

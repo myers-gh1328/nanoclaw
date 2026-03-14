@@ -262,7 +262,10 @@ async function handleIntakeApproval(
     savePendingIssues(INTAKE_GROUP_FOLDER, remaining);
     const issueNum = issue.issueNumber;
     if (issueNum) {
-      await channel.sendMessage(chatJid, `Routing #${issueNum} to Claude agent...`);
+      await channel.sendMessage(
+        chatJid,
+        `Routing #${issueNum} to Claude agent...`,
+      );
       triggerManualInvestigation(issueNum, channel, chatJid).catch((err) => {
         logger.error({ issueNum, err }, 'Claude investigation error');
         channel.sendMessage(
