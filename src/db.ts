@@ -3,6 +3,7 @@ import fs from 'fs';
 import path from 'path';
 
 import { ASSISTANT_NAME, DATA_DIR, STORE_DIR } from './config.js';
+import { initRecipeIndex } from './recipe-index.js';
 import { isValidGroupFolder } from './group-folder.js';
 import { logger } from './logger.js';
 import {
@@ -102,6 +103,15 @@ function createSchema(database: Database.Database): void {
     /* column already exists */
   }
 
+  // Add system_prompt column if it doesn't exist (migration for existing DBs)
+  try {
+    database.exec(
+      `ALTER TABLE scheduled_tasks ADD COLUMN system_prompt TEXT`,
+    );
+  } catch {
+    /* column already exists */
+  }
+
   // Add is_bot_message column if it doesn't exist (migration for existing DBs)
   try {
     database.exec(
@@ -150,12 +160,17 @@ function createSchema(database: Database.Database): void {
   }
 }
 
+export function getDb(): Database.Database {
+  return db;
+}
+
 export function initDatabase(): void {
   const dbPath = path.join(STORE_DIR, 'messages.db');
   fs.mkdirSync(path.dirname(dbPath), { recursive: true });
 
   db = new Database(dbPath);
   createSchema(db);
+  initRecipeIndex(db);
 
   // Migrate from JSON files if they exist
   migrateJsonState();
@@ -377,8 +392,8 @@ export function createTask(
 ): void {
   db.prepare(
     `
-    INSERT INTO scheduled_tasks (id, group_folder, chat_jid, prompt, schedule_type, schedule_value, context_mode, agent_type, next_run, status, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO scheduled_tasks (id, group_folder, chat_jid, prompt, schedule_type, schedule_value, context_mode, agent_type, system_prompt, next_run, status, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `,
   ).run(
     task.id,
@@ -389,6 +404,7 @@ export function createTask(
     task.schedule_value,
     task.context_mode || 'isolated',
     task.agent_type || 'claude',
+    task.system_prompt ?? null,
     task.next_run,
     task.status,
     task.created_at,
@@ -420,7 +436,12 @@ export function updateTask(
   updates: Partial<
     Pick<
       ScheduledTask,
-      'prompt' | 'schedule_type' | 'schedule_value' | 'next_run' | 'status'
+      | 'prompt'
+      | 'schedule_type'
+      | 'schedule_value'
+      | 'next_run'
+      | 'status'
+      | 'system_prompt'
     >
   >,
 ): void {
@@ -430,6 +451,10 @@ export function updateTask(
   if (updates.prompt !== undefined) {
     fields.push('prompt = ?');
     values.push(updates.prompt);
+  }
+  if ('system_prompt' in updates) {
+    fields.push('system_prompt = ?');
+    values.push(updates.system_prompt ?? null);
   }
   if (updates.schedule_type !== undefined) {
     fields.push('schedule_type = ?');

@@ -1,0 +1,15 @@
+FROM qwen3.5:9b
+
+# Optimized parameters for precise coding logic
+PARAMETER temperature 0.6
+PARAMETER top_p 0.95
+PARAMETER top_k 20
+PARAMETER repeat_penalty 1.05
+
+# Set a coding-specific persona
+SYSTEM """
+You are an expert Senior Software Engineer.
+When asked to code, first use your <think> space to plan the architecture,
+consider edge cases, and verify logic.
+Provide clean, efficient, and well-documented code in your final response.
+"""

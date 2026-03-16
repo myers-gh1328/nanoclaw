@@ -437,6 +437,9 @@ export async function runBugInvestigation(
     `${issue.body}\n\n` +
     `Repository: ${INVOICING_PATH}\n` +
     `GitHub repo: ${INVOICING_REPO}\n\n` +
+    `SPEED RULES — follow these to avoid timeout:\n` +
+    `- Call tools in sequence WITHOUT any narration between them. No "Now I will...", no "Let me...", no explanations. Just tool calls, one after another.\n` +
+    `- Only write text when you have a final result (RESULT:FIXED or RESULT:ASSIGNED).\n\n` +
     `INSTRUCTIONS:\n` +
     `1. Start by reading ${INVOICING_PATH}/docs/ai-bug-hunting/bug-hunting-index.md — it lists all investigation docs and when to use each. Then read ${INVOICING_PATH}/docs/ai-bug-hunting/quick-start-checklist.md for the step-by-step investigation workflow. Use code-entrypoints-by-symptom.md to find the exact files and methods for the symptom, and codebase-map.md to navigate the project structure.\n` +
     `2. Finding the file — use this strategy:\n` +

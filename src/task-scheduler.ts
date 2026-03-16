@@ -152,7 +152,9 @@ async function runTask(
 
   if (task.agent_type === 'ollama') {
     try {
-      result = await runOllamaAgent(task.prompt, task.group_folder);
+      result = await runOllamaAgent(task.prompt, task.group_folder, {
+        systemPrompt: task.system_prompt ?? undefined,
+      });
       await deps.sendMessage(task.chat_jid, result);
       logger.info(
         { taskId: task.id, durationMs: Date.now() - startTime },

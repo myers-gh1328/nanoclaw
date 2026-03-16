@@ -162,6 +162,7 @@ export async function processTaskIpc(
     schedule_value?: string;
     context_mode?: string;
     agent_type?: string;
+    system_prompt?: string;
     groupFolder?: string;
     chatJid?: string;
     targetJid?: string;
@@ -256,6 +257,10 @@ export async function processTaskIpc(
             ? data.context_mode
             : 'isolated';
         const agentType = data.agent_type === 'ollama' ? 'ollama' : 'claude';
+        const systemPrompt =
+          typeof data.system_prompt === 'string' && data.system_prompt.trim()
+            ? data.system_prompt.trim()
+            : null;
         createTask({
           id: taskId,
           group_folder: targetFolder,
@@ -265,6 +270,7 @@ export async function processTaskIpc(
           schedule_value: data.schedule_value,
           context_mode: contextMode,
           agent_type: agentType,
+          system_prompt: systemPrompt,
           next_run: nextRun,
           status: 'active',
           created_at: new Date().toISOString(),

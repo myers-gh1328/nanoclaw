@@ -19,8 +19,8 @@ import { logger } from './logger.js';
 const envConfig = readEnvFile(['OLLAMA_HOST', 'OLLAMA_MODEL', 'BRAVE_API_KEY']);
 const OLLAMA_HOST =
   process.env.OLLAMA_HOST || envConfig.OLLAMA_HOST || 'http://localhost:11434';
-const OLLAMA_MODEL =
-  process.env.OLLAMA_MODEL || envConfig.OLLAMA_MODEL || 'llama3.1:8b';
+export const OLLAMA_MODEL =
+  process.env.OLLAMA_MODEL || envConfig.OLLAMA_MODEL || 'gemma3:1b';
 const BRAVE_API_KEY = process.env.BRAVE_API_KEY || envConfig.BRAVE_API_KEY;
 const MAX_HISTORY = 100;
 const MAX_TOOL_ITERATIONS = 20;
@@ -161,7 +161,7 @@ const TOOLS = [
   },
 ];
 
-const SYSTEM_PROMPT = `You are a coding assistant. You have tools to read/write files and run shell commands.
+const SYSTEM_PROMPT = `You have tools to read/write files and run shell commands.
 
 CRITICAL RULES — violation is failure:
 1. NEVER list steps you are going to take. Just take them immediately using tools.
@@ -169,7 +169,7 @@ CRITICAL RULES — violation is failure:
 3. NEVER describe code changes. Use write_file to make them.
 4. NEVER ask the user to run commands. Use bash to run them yourself.
 5. After completing all tool calls, write a SHORT summary of what you did.
-6. There is NO "gh" tool and NO "git" tool. Run ALL gh and git commands through the "bash" tool (e.g. bash with command "gh pr create ..." or "git push ...").
+6. There is NO "gh" tool and NO "git" tool. Run ALL gh and git commands through the "bash" tool.
 7. When pushing a new branch for the first time, ALWAYS use "git push -u origin <branch>" (the -u flag is required).
 
 Tools:
@@ -185,7 +185,14 @@ Workspace: /Users/nanobot/code — repos are already cloned in subdirectories:
 To work on a repo, use its full path. NEVER clone or delete anything in /Users/nanobot/code directly.
 GitHub is authenticated. Use gh for issues. Use git inside a repo directory to commit and push.
 
-When asked to do something: use tools first, summarize after. No planning. No steps. Just do it.`;
+Git workflow for code changes:
+1. Create a new branch: git checkout -b <descriptive-branch-name>
+2. Write tests first, then implement the change
+3. Run the tests and confirm they pass before committing
+4. Commit with a clear message, then push: git push -u origin <branch>
+5. Open a PR with gh: gh pr create --title "..." --body "..."
+
+When asked to do something: think it through first, then use tools to execute. Summarize after. Never ask the user to run commands.`;
 
 const histories = new Map<string, Message[]>();
 
@@ -237,7 +244,7 @@ const DANGEROUS_PATTERNS = [
   />\s*\/dev\/sd/, // overwrite device
 ];
 
-function isDangerous(command: string): boolean {
+export function isDangerous(command: string): boolean {
   return DANGEROUS_PATTERNS.some((p) => p.test(command));
 }
 
@@ -284,7 +291,7 @@ export async function executeBash(
  * Repair JSON that has literal newlines/tabs inside string values.
  * LLMs sometimes forget to escape control characters in multi-line content fields.
  */
-function repairJsonStrings(s: string): string {
+export function repairJsonStrings(s: string): string {
   let result = '';
   let inString = false;
   let escaped = false;
@@ -324,7 +331,7 @@ function repairJsonStrings(s: string): string {
   return result;
 }
 
-function parseContentToolCall(
+export function parseContentToolCall(
   content: string,
 ): { name: string; arguments: Record<string, unknown> } | null {
   if (!content) return null;
@@ -410,9 +417,12 @@ export async function parseIntent<T>(
   text: string,
 ): Promise<T | null> {
   const systemPrompt =
-    `You are a strict JSON extractor. Extract structured data from user messages.\n` +
-    `Return ONLY valid JSON — no explanation, no markdown, no code fences.\n` +
-    `If you cannot confidently extract the data, return exactly: null`;
+    `You are a strict JSON classifier. Your only job is to read a user message and return a single JSON object.\n` +
+    `You must ALWAYS return valid JSON. Never return prose, explanations, or markdown.\n` +
+    `Do not say sorry. Do not say you cannot do something. Just return the JSON.\n` +
+    `If you are unsure, pick the closest match — never return null unless explicitly told to.\n` +
+    `Correct output example: {"type":"chat"}\n` +
+    `Incorrect output example: I'm sorry, I cannot determine...`;
 
   const prompt =
     `${context}\n\n` + `Schema: ${schema}\n\n` + `Message: "${text}"`;
@@ -424,7 +434,7 @@ export async function parseIntent<T>(
     const reply = await runOllamaAgent(prompt, folder, {
       systemPrompt,
       allowedTools: [],
-      model: 'llama3.2:1b',
+      model: 'gemma3:1b',
       numCtx: 2048,
     });
     clearOllamaHistory(folder);
@@ -484,6 +494,10 @@ export async function runOllamaAgent(
     if (deadline && Date.now() > deadline) {
       return 'Error: investigation time limit reached.';
     }
+
+    // Use stream:true so Ollama sends headers immediately (avoids Node's 5-min
+    // headersTimeout on non-streaming requests where the model thinks for a long time).
+    // We collect all chunks and reconstruct the full message before returning.
     const response = await fetch(`${OLLAMA_HOST}/api/chat`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -504,9 +518,10 @@ export async function runOllamaAgent(
           }
           return all;
         })(),
-        stream: false,
+        stream: true,
         options: { num_ctx: options?.numCtx ?? 16384 },
       }),
+      signal: AbortSignal.timeout(35 * 60 * 1000), // 35-min hard cap per request
     });
 
     if (!response.ok) {
@@ -515,12 +530,33 @@ export async function runOllamaAgent(
       );
     }
 
-    const data = (await response.json()) as {
+    // Accumulate streaming chunks into a single message
+    let fullContent = '';
+    let finalToolCalls: ToolCall[] | undefined;
+    const rawText = await response.text();
+    for (const line of rawText.split('\n')) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      try {
+        const chunk = JSON.parse(trimmed) as {
+          message?: { role?: string; content?: string; tool_calls?: ToolCall[] };
+          done?: boolean;
+        };
+        if (chunk.message?.content) fullContent += chunk.message.content;
+        if (chunk.message?.tool_calls?.length) {
+          finalToolCalls = chunk.message.tool_calls;
+        }
+      } catch {
+        /* skip malformed chunk */
+      }
+    }
+
+    const data = {
       message: {
-        role: string;
-        content: string;
-        tool_calls?: ToolCall[];
-      };
+        role: 'assistant' as const,
+        content: fullContent,
+        tool_calls: finalToolCalls,
+      },
     };
 
     const msg = data.message;

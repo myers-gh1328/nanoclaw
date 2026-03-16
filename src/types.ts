@@ -62,6 +62,7 @@ export interface ScheduledTask {
   schedule_value: string;
   context_mode: 'group' | 'isolated';
   agent_type: 'claude' | 'ollama';
+  system_prompt: string | null;
   next_run: string | null;
   last_run: string | null;
   last_result: string | null;

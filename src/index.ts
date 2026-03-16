@@ -54,7 +54,10 @@ import {
   shouldDropMessage,
 } from './sender-allowlist.js';
 import { startSchedulerLoop } from './task-scheduler.js';
-import { executeBash, runOllamaAgent, parseIntent } from './ollama-agent.js';
+import { executeBash, runOllamaAgent, parseIntent, OLLAMA_MODEL } from './ollama-agent.js';
+import { runRecipeAgent } from './recipe-agent.js';
+import { indexAllRecipes, keepModelLoaded, startRecipeWatcher } from './recipe-index.js';
+import { getDb } from './db.js';
 import {
   runIntakeAgent,
   loadPendingIssues,
@@ -74,6 +77,14 @@ import { getGithubToken } from './github-token.js';
 import { Channel, NewMessage, RegisteredGroup } from './types.js';
 import { logger } from './logger.js';
 
+import { createRequire } from 'module';
+const _require = createRequire(import.meta.url);
+const APP_VERSION: string = (_require('../package.json') as { version: string }).version;
+
+function agentFooter(model: string): string {
+  return `\n\n_[${model} · v${APP_VERSION}]_`;
+}
+
 const TELEGRAM_MAIN_JID = 'tg:8388828787';
 const TELEGRAM_OLLAMA_JID = 'tgo:8388828787';
 const TELEGRAM_BUG_INTAKE_JID = 'tgo:-5191721027';
@@ -88,9 +99,55 @@ let sessions: Record<string, string> = {};
 let registeredGroups: Record<string, RegisteredGroup> = {};
 let lastAgentTimestamp: Record<string, string> = {};
 const acknowledgedTimestamp: Record<string, string> = {};
+
+const SESSION_TIMEOUT_MS = 10 * 60 * 1000;
+const SESSION_RESET_RE =
+  /^(new session|end session|reset|switch|stop|clear|nevermind|start over)$/i;
+const routerSessions = new Map<string, { agent: 'recipe' | 'queue' | 'chat'; lastActivity: number }>();
+
+function loadRouterSessions(): void {
+  try {
+    const raw = getRouterState('router_sessions');
+    if (!raw) return;
+    const entries = JSON.parse(raw) as Array<[string, { agent: 'recipe' | 'queue' | 'chat'; lastActivity: number }]>;
+    const now = Date.now();
+    for (const [jid, s] of entries) {
+      if (now - s.lastActivity <= SESSION_TIMEOUT_MS) {
+        routerSessions.set(jid, s);
+      }
+    }
+  } catch { /* ignore */ }
+}
+
+function saveRouterSessions(): void {
+  setRouterState('router_sessions', JSON.stringify([...routerSessions.entries()]));
+}
+
+function getActiveSession(chatJid: string): 'recipe' | 'queue' | 'chat' | null {
+  const s = routerSessions.get(chatJid);
+  if (!s) return null;
+  if (Date.now() - s.lastActivity > SESSION_TIMEOUT_MS) {
+    routerSessions.delete(chatJid);
+    saveRouterSessions();
+    return null;
+  }
+  return s.agent;
+}
+
+function setActiveSession(chatJid: string, agent: 'recipe' | 'queue' | 'chat'): void {
+  routerSessions.set(chatJid, { agent, lastActivity: Date.now() });
+  saveRouterSessions();
+}
 let messageLoopRunning = false;
 
 const channels: Channel[] = [];
+
+/** Keep the Telegram typing indicator alive for the duration of a slow operation. */
+function keepTyping(channel: Channel, chatJid: string): () => void {
+  channel.setTyping?.(chatJid, true);
+  const interval = setInterval(() => channel.setTyping?.(chatJid, true), 4000);
+  return () => clearInterval(interval);
+}
 const queue = new GroupQueue();
 
 function loadState(): void {
@@ -110,6 +167,7 @@ function loadState(): void {
   }
   sessions = getAllSessions();
   registeredGroups = getAllRegisteredGroups();
+  loadRouterSessions();
   logger.info(
     { groupCount: Object.keys(registeredGroups).length },
     'State loaded',
@@ -447,16 +505,28 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     const text = isOllamaChat
       ? (lastUserMsg?.content.trim() ?? prompt)
       : lastUserMsg!.content.trim().replace(ollamaPrefix, '');
-    await channel.setTyping?.(chatJid, true);
-    if (chatJid === TELEGRAM_OLLAMA_JID) {
-      await channel.sendMessage(chatJid, 'Routing message to agent...');
-    }
+    const stopTyping = keepTyping(channel, chatJid);
     try {
       if (chatJid === SLACK_INTAKE_JID) {
         const userMessages = missedMessages.filter((m) => !m.is_from_me);
         for (const msg of userMessages) {
           const reporterName = msg.sender_name ?? 'unknown';
           const userId = msg.sender;
+
+          // If there's already a pending investigation decision for this channel,
+          // don't process new intake — remind the user to respond first.
+          const pendingNow = loadPendingIssues(INTAKE_GROUP_FOLDER).filter(
+            (i) => i.sourceJid === chatJid,
+          );
+          if (pendingNow.length > 0) {
+            await channel.sendMessage(
+              chatJid,
+              `@${reporterName} — there's already an open question waiting for a response:\n\n` +
+                pendingNow.map((i) => formatInvestigationQuestion(i)).join('\n\n'),
+            );
+            continue;
+          }
+
           const hasImage = msg.content.includes(
             '(Note: the user also attached an image which could not be processed.)',
           );
@@ -519,60 +589,109 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
           }
         }
       } else if (chatJid === TELEGRAM_OLLAMA_JID) {
-        const reply = await runOllamaAgent(text, group.folder, {
-          model: 'llama3.2:1b',
-          numCtx: 4096,
-          systemPrompt:
-            `You are a control assistant for the Invoicing bug intake system. ` +
-            `You can answer questions about the queue and help the user manage investigations.\n\n` +
-            `If the user wants to investigate a GitHub issue — in any phrasing — call the queue_investigation tool with the issue number.\n` +
-            `If the user asks about queue status, reply with the current queue state.\n` +
-            `Do not attempt to investigate issues yourself using bash or any other tool.`,
-          extraTools: [
-            {
-              type: 'function',
-              function: {
-                name: 'queue_investigation',
-                description:
-                  'Queue a GitHub issue for automated investigation. Use this whenever the user asks to investigate, look into, fix, or check any issue.',
-                parameters: {
-                  type: 'object',
-                  properties: {
-                    issue_number: {
-                      type: 'string',
-                      description: 'The GitHub issue number to investigate',
+        // Check for explicit session reset
+        if (SESSION_RESET_RE.test(text.trim())) {
+          routerSessions.delete(chatJid);
+          await channel.sendMessage(chatJid, 'Session cleared.');
+        } else {
+        // Sticky routing: skip intent classifier if session is active
+        let agentType = getActiveSession(chatJid);
+        if (!agentType) {
+          await channel.sendMessage(chatJid, 'Detecting intent...');
+          const intent = await parseIntent<{ type: 'recipe' | 'queue' | 'chat' }>(
+            `{"type": "recipe" | "queue" | "chat"}`,
+            `You are the intent router for a personal assistant bot. Your job is to read the user's message and decide which agent should handle it.\n\n` +
+              `There are three agents:\n` +
+              `- "recipe": handles anything about food — recipes, ingredients, cooking, meal ideas, shopping lists, snacks, dietary questions. Also handles messages starting with "@recipe" or "@recipes".\n` +
+              `- "queue": handles software bug investigations — GitHub issue numbers, investigation requests, queue status, fix requests.\n` +
+              `- "chat": handles everything else — greetings, general questions, unrelated topics.\n\n` +
+              `Return exactly one JSON object. Example outputs: {"type":"recipe"} or {"type":"queue"} or {"type":"chat"}`,
+            text,
+          );
+          agentType = intent?.type ?? 'chat';
+        }
+        setActiveSession(chatJid, agentType);
+
+        if (agentType === 'recipe') {
+          await channel.sendMessage(chatJid, 'Routing to recipe agent...');
+          const reply = await runRecipeAgent(text, group.folder);
+          if (reply) await channel.sendMessage(chatJid, reply + agentFooter('qwen3.5:9b'));
+        } else if (agentType === 'queue') {
+          await channel.sendMessage(chatJid, 'Routing to queue agent...');
+          const reply = await runOllamaAgent(text, group.folder, {
+            model: 'gemma3:1b',
+            numCtx: 4096,
+            systemPrompt:
+              `You are a control assistant for the Invoicing bug intake system. ` +
+              `You can answer questions about the queue and help the user manage investigations.\n\n` +
+              `If the user wants to investigate a GitHub issue — in any phrasing — call the queue_investigation tool with the issue number.\n` +
+              `If the user asks about queue status, reply with the current queue state.\n` +
+              `Do not attempt to investigate issues yourself using bash or any other tool.`,
+            extraTools: [
+              {
+                type: 'function',
+                function: {
+                  name: 'queue_investigation',
+                  description:
+                    'Queue a GitHub issue for automated investigation. Use this whenever the user asks to investigate, look into, fix, or check any issue.',
+                  parameters: {
+                    type: 'object',
+                    properties: {
+                      issue_number: {
+                        type: 'string',
+                        description: 'The GitHub issue number to investigate',
+                      },
                     },
+                    required: ['issue_number'],
                   },
-                  required: ['issue_number'],
                 },
               },
+            ],
+            toolHandler: async (name, args) => {
+              if (name === 'queue_investigation') {
+                const issueNum = String(args['issue_number']).replace(/\D/g, '');
+                if (!issueNum)
+                  return { result: 'Error: no issue number provided.' };
+                triggerManualInvestigation(issueNum, channel, chatJid).catch(
+                  (err) => {
+                    logger.error({ issueNum, err }, 'Manual investigation error');
+                    channel.sendMessage(
+                      chatJid,
+                      `Investigation error: ${err instanceof Error ? err.message : String(err)}`,
+                    );
+                  },
+                );
+                return { result: `Issue #${issueNum} queued.`, stop: true };
+              }
+              return null;
             },
-          ],
-          toolHandler: async (name, args) => {
-            if (name === 'queue_investigation') {
-              const issueNum = String(args['issue_number']).replace(/\D/g, '');
-              if (!issueNum)
-                return { result: 'Error: no issue number provided.' };
-              triggerManualInvestigation(issueNum, channel, chatJid).catch(
-                (err) => {
-                  logger.error({ issueNum, err }, 'Manual investigation error');
-                  channel.sendMessage(
-                    chatJid,
-                    `Investigation error: ${err instanceof Error ? err.message : String(err)}`,
-                  );
-                },
-              );
-              return { result: `Issue #${issueNum} queued.`, stop: true };
-            }
-            return null;
-          },
-        });
-        if (reply) await channel.sendMessage(chatJid, reply);
+          });
+          if (reply) await channel.sendMessage(chatJid, reply + agentFooter('gemma3:1b'));
+        } else {
+          await channel.sendMessage(chatJid, 'Routing to chat agent...');
+          const reply = await runOllamaAgent(text, group.folder);
+          if (reply) await channel.sendMessage(chatJid, reply + agentFooter(OLLAMA_MODEL));
+        }
+        } // end sticky routing else
       } else if (chatJid === TELEGRAM_BUG_INTAKE_JID) {
         const senderName =
           missedMessages.filter((m) => !m.is_from_me).pop()?.sender_name ??
           'App User';
         const userId = `app:${senderName.replace(/\W+/g, '_').toLowerCase()}`;
+
+        // If there's already a pending investigation decision for this channel,
+        // don't process new intake — re-send the open question.
+        const pendingNow = loadPendingIssues(INTAKE_GROUP_FOLDER).filter(
+          (i) => i.sourceJid === chatJid,
+        );
+        if (pendingNow.length > 0) {
+          await channel.sendMessage(
+            chatJid,
+            pendingNow.map((i) => formatInvestigationQuestion(i)).join('\n\n'),
+          );
+          return true;
+        }
+
         await channel.sendMessage(
           chatJid,
           'Bug report received. Processing...',
@@ -627,13 +746,15 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
           );
         }
       } else {
+        await channel.sendMessage(chatJid, 'Routing to chat agent...');
         const reply = await runOllamaAgent(text, group.folder);
-        if (reply) await channel.sendMessage(chatJid, reply);
+        if (reply) await channel.sendMessage(chatJid, reply + agentFooter(OLLAMA_MODEL));
       }
     } catch (err) {
       logger.error({ group: group.name, err }, 'Ollama agent error');
       await channel.sendMessage(chatJid, 'Ollama error — is it running?');
     } finally {
+      stopTyping();
       await channel.setTyping?.(chatJid, false);
     }
     return true;
@@ -937,6 +1058,17 @@ async function main(): Promise<void> {
   loadState();
   resetRunningItems();
 
+  // Index existing recipes and watch for changes (runs in background)
+  const recipeDb = getDb();
+  const recipeNotify = (msg: string): void => {
+    const ch = channels.find((c) => c.ownsJid(TELEGRAM_OLLAMA_JID));
+    if (ch) ch.sendMessage(TELEGRAM_OLLAMA_JID, msg).catch(() => {});
+  };
+  startRecipeWatcher(recipeDb, recipeNotify);
+  indexAllRecipes(recipeDb, recipeNotify)
+    .catch((err) => logger.warn({ err }, 'Recipe index: initial indexing failed'))
+    .finally(() => keepModelLoaded('gemma3:1b').catch(() => {}));
+
   // Start credential proxy (containers route API calls through this)
   const proxyServer = await startCredentialProxy(
     CREDENTIAL_PROXY_PORT,
@@ -1087,6 +1219,11 @@ const isDirectRun =
 
 if (isDirectRun) {
   main().catch((err) => {
+    // Exit 0 on EADDRINUSE — another instance is already running, launchd should not restart
+    if ((err as NodeJS.ErrnoException).code === 'EADDRINUSE') {
+      logger.warn('Port already in use — another instance is running, exiting silently');
+      process.exit(0);
+    }
     logger.error({ err }, 'Failed to start NanoClaw');
     process.exit(1);
   });
